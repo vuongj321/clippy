@@ -1,0 +1,18 @@
+[
+  {"ts": 10.0, "user": "a", "text": "hey"},
+  {"ts": 12.0, "user": "b", "text": "what's up"},
+  {"ts": 14.0, "user": "c", "text": "lol"},
+  {"ts": 60.0, "user": "a", "text": "quiet stream"},
+  {"ts": 120.0, "user": "x", "text": "WAIT"},
+  {"ts": 120.2, "user": "y", "text": "NO WAY"},
+  {"ts": 120.4, "user": "z", "text": "CLIP IT"},
+  {"ts": 120.5, "user": "x", "text": "CLIP THAT"},
+  {"ts": 120.6, "user": "y", "text": "LMAO"},
+  {"ts": 120.7, "user": "z", "text": "sheesh"},
+  {"ts": 120.8, "user": "a", "text": "POG"},
+  {"ts": 120.9, "user": "b", "text": "CLIP IT"},
+  {"ts": 121.0, "user": "c", "text": "again"},
+  {"ts": 180.0, "user": "a", "text": "back to normal"},
+  {"ts": 200.0, "user": "b", "text": "nice"},
+  {"ts": 240.0, "user": "c", "text": "bye"}
+]

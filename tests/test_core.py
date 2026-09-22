@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from clippy.chat.models import load_chat_json
+from clippy.chat.signals import detect_chat_signals
+from clippy.detect.detector import RawDetection, coalesce_detections, combine_signal_events
+from clippy.store.db import Database
+
+
+def test_load_chat_sample():
+    path = Path(__file__).resolve().parents[1] / "samples" / "chat_sample.json"
+    messages = load_chat_json(path)
+    assert len(messages) > 0
+    assert messages[0].ts <= messages[-1].ts
+
+
+def test_chat_spike_and_keyword():
+    path = Path(__file__).resolve().parents[1] / "samples" / "chat_sample.json"
+    messages = load_chat_json(path)
+    events = detect_chat_signals(
+        messages,
+        window_seconds=5.0,
+        baseline_seconds=60.0,
+        spike_multiplier=2.0,
+        min_rate=0.3,
+        keywords=["clip it", "clip"],
+    )
+    kinds = {e.kind for e in events}
+    assert "keyword" in kinds
+    assert any(e.kind == "rate_spike" for e in events) or any(
+        e.kind == "keyword" for e in events
+    )
+
+
+def test_coalesce_merges_nearby():
+    dets = [
+        RawDetection(ts=10.0, score=0.5, signals={"kind": "a"}),
+        RawDetection(ts=15.0, score=0.9, signals={"kind": "b"}),
+        RawDetection(ts=50.0, score=0.4, signals={"kind": "c"}),
+    ]
+    out = coalesce_detections(dets, gap_seconds=20.0)
+    assert len(out) == 2
+    assert out[0].score == 0.9
+    assert out[0].ts == 15.0
+
+
+def test_combine_boosts_chat_audio():
+    from types import SimpleNamespace
+
+    chat = [SimpleNamespace(ts=10.0, kind="keyword", score=0.7, details={"keyword": "clip"})]
+    audio = [
+        SimpleNamespace(ts=11.0, kind="intensity_spike", score=0.75, details={"rms": 0.1})
+    ]
+    raw = combine_signal_events(chat, audio, proximity_seconds=5.0)
+    assert len(raw) == 1
+    assert raw[0].signals["kind"] == "chat_audio"
+    assert raw[0].score > 0.7
+
+
+def test_database_review_roundtrip(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(streamer.id, "vod", vod_id="123")
+    cand = db.create_candidate(
+        stream.id,
+        source_ts=42.0,
+        pre_context_seconds=30,
+        post_context_seconds=30,
+        signals={"kind": "keyword"},
+        score=0.8,
+    )
+    db.review_candidate(cand.id, "approved")
+    stats = db.stats()
+    assert stats["approved"] == 1
+    assert stats["approve_rate"] == 1.0
+    exported = db.export_reviews()
+    assert exported[0]["decision"] == "approved"
