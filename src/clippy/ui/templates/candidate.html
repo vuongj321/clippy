@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Candidate #{{ view.candidate.id }}{% endblock %}
+{% block content %}
+<p><a href="/">← Back</a></p>
+<h1>Candidate #{{ view.candidate.id }}</h1>
+<p class="sub">
+  {{ view.streamer_display_name }} ({{ view.streamer_login }}) ·
+  t={{ '%.1f'|format(view.candidate.source_ts) }}s ·
+  score={{ '%.2f'|format(view.candidate.score) }} ·
+  {{ view.candidate.status }}
+</p>
+
+{% if view.candidate.media_path %}
+  <video class="detail-video" controls autoplay src="/media/{{ view.candidate.id }}"></video>
+{% else %}
+  <p class="muted">No media extracted for this candidate.</p>
+{% endif %}
+
+<section class="panel">
+  <h2>Signals</h2>
+  <pre>{{ view.candidate.signals | tojson(indent=2) }}</pre>
+</section>
+
+<section class="panel">
+  <h2>Transcript</h2>
+  <p class="muted">Placeholder — ASR not in MVP.</p>
+</section>
+
+{% if view.candidate.status == 'pending' %}
+<form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/review">
+  <label>
+    Notes
+    <input type="text" name="notes" placeholder="Optional notes" />
+  </label>
+  <button name="decision" value="approved" type="submit">Approve</button>
+</form>
+<form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/review">
+  <input type="hidden" name="notes" value="" />
+  <select name="reason_code" required>
+    <option value="">Reject reason…</option>
+    {% for reason in reasons %}
+      <option value="{{ reason }}">{{ reason }}</option>
+    {% endfor %}
+  </select>
+  <button name="decision" value="rejected" type="submit" class="secondary">Reject</button>
+</form>
+{% elif view.review %}
+<section class="panel">
+  <h2>Review</h2>
+  <p>{{ view.review.decision }} {% if view.review.reason_code %}· {{ view.review.reason_code }}{% endif %}</p>
+  {% if view.review.notes %}<p>{{ view.review.notes }}</p>{% endif %}
+</section>
+{% endif %}
+{% endblock %}

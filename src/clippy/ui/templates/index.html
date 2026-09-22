@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Clippy — {{ status }}{% endblock %}
+{% block content %}
+<h1>Candidates <span class="muted">({{ status }})</span></h1>
+
+{% if not candidates %}
+  <p class="empty">No candidates in this view. Run a VOD pipeline, then refresh.</p>
+{% else %}
+  <div class="grid">
+    {% for view in candidates %}
+      <article class="card">
+        <div class="meta">
+          <a href="/candidates/{{ view.candidate.id }}">
+            #{{ view.candidate.id }} · {{ view.streamer_display_name }}
+          </a>
+          <span class="score">{{ '%.2f'|format(view.candidate.score) }}</span>
+        </div>
+        <div class="sub">
+          t={{ '%.1f'|format(view.candidate.source_ts) }}s · {{ view.stream_mode }} · {{ view.candidate.status }}
+        </div>
+        {% if view.candidate.media_path %}
+          <video controls preload="metadata" src="/media/{{ view.candidate.id }}"></video>
+        {% else %}
+          <p class="muted">No media extracted</p>
+        {% endif %}
+        <div class="signals">
+          <code>{{ view.candidate.signals.get('kind', view.candidate.signals.get('kinds', [])) }}</code>
+        </div>
+        {% if view.candidate.status == 'pending' %}
+        <form class="actions" method="post" action="/candidates/{{ view.candidate.id }}/review">
+          <button name="decision" value="approved" type="submit">Approve</button>
+          <select name="reason_code" aria-label="Reject reason">
+            <option value="">Reject reason…</option>
+            {% for reason in reasons %}
+              <option value="{{ reason }}">{{ reason }}</option>
+            {% endfor %}
+          </select>
+          <button name="decision" value="rejected" type="submit" class="secondary">Reject</button>
+        </form>
+        {% endif %}
+      </article>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{% if stats.rejection_reasons %}
+  <section class="reasons">
+    <h2>Rejection reasons</h2>
+    <ul>
+      {% for code, count in stats.rejection_reasons.items() %}
+        <li><code>{{ code }}</code> — {{ count }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+{% endif %}
+{% endblock %}
