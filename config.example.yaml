@@ -1,0 +1,42 @@
+# Clippy configuration (optional). Env vars with CLIPPY_ prefix override these.
+
+# Paths (defaults: ./data)
+# data_dir: data
+# db_path: data/clippy.db
+# media_dir: data/media
+# buffer_dir: data/buffer
+
+pre_context_seconds: 30.0
+post_context_seconds: 30.0
+coalesce_gap_seconds: 20.0
+
+chat_window_seconds: 5.0
+chat_baseline_seconds: 60.0
+chat_spike_multiplier: 3.0
+chat_min_rate: 0.5
+chat_keywords:
+  - clip it
+  - clip that
+  - clip this
+  - clip
+chat_keyword_score: 0.7
+chat_spike_score: 0.85
+
+audio_frame_seconds: 0.5
+audio_baseline_seconds: 30.0
+audio_spike_multiplier: 2.5
+audio_min_rms: 0.02
+audio_spike_score: 0.75
+
+disk_budget_gb: 20.0
+ffmpeg_path: ffmpeg
+ffprobe_path: ffprobe
+
+# Live Twitch (also set via .env)
+# twitch_client_id: ""
+# twitch_client_secret: ""
+# twitch_irc_nick: ""
+# twitch_irc_oauth: ""
+
+host: 127.0.0.1
+port: 8000

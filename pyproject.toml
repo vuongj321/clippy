@@ -1,0 +1,44 @@
+[project]
+name = "clippy"
+version = "0.1.0"
+description = "Detect clip-worthy moments from Twitch streams for human review"
+readme = "README.md"
+authors = [
+    { name = "Jason Vuong", email = "jasonvuong04@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "jinja2>=3.1.4",
+    "python-multipart>=0.0.12",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "httpx>=0.27.0",
+    "numpy>=2.1.0",
+    "pyyaml>=6.0.2",
+    "websockets>=13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[project.scripts]
+clippy-vod = "clippy.cli:run_vod_main"
+clippy-live = "clippy.cli:run_live_main"
+clippy-serve = "clippy.cli:serve_main"
+clippy-export = "clippy.cli:export_main"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv]
+package = true
