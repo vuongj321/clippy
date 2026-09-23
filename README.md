@@ -29,6 +29,8 @@ Open http://127.0.0.1:8000 to review candidates.
 
 Chat JSON may be a list of `{ "ts", "user", "text" }` objects, or `{ "messages": [...] }` / `{ "comments": [...] }`.
 
+Set `CLIPPY_OPENAI_API_KEY` in `.env` to generate a short UI caption and transcript for **new** runs (speech-to-text on each extracted window, plus nearby chat). Extract reasons are always written from detection signals. Older candidates are not backfilled. Captions are shown in the review UI only — they are not burned into the MP4 yet.
+
 ## Live pipeline
 
 ```bash
@@ -59,4 +61,4 @@ docs/           architecture notes
 
 ## Config
 
-See `config.example.yaml`. Important knobs: `pre_context_seconds`, `post_context_seconds`, `coalesce_gap_seconds`, chat spike multiplier, audio spike multiplier, `disk_budget_gb`.
+See `config.example.yaml`. Important knobs: `pre_context_seconds`, `post_context_seconds`, `coalesce_gap_seconds`, chat spike multiplier, audio spike multiplier, `disk_budget_gb`, `asr_model`, `caption_model`.

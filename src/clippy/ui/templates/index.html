@@ -11,11 +11,16 @@
       <article class="card">
         <div class="meta">
           <a href="/candidates/{{ view.candidate.id }}">
-            #{{ view.candidate.id }} · {{ view.streamer_display_name }}
+            {% if view.candidate.caption %}
+              {{ view.candidate.caption }}
+            {% else %}
+              #{{ view.candidate.id }} · {{ view.streamer_display_name }}
+            {% endif %}
           </a>
           <span class="score">{{ '%.2f'|format(view.candidate.score) }}</span>
         </div>
         <div class="sub">
+          #{{ view.candidate.id }} · {{ view.streamer_display_name }} ·
           t={{ '%.1f'|format(view.candidate.source_ts) }}s · {{ view.stream_mode }} · {{ view.candidate.status }}
         </div>
         {% if view.candidate.media_path %}
@@ -23,9 +28,13 @@
         {% else %}
           <p class="muted">No media extracted</p>
         {% endif %}
-        <div class="signals">
-          <code>{{ view.candidate.signals.get('kind', view.candidate.signals.get('kinds', [])) }}</code>
-        </div>
+        {% if view.candidate.extract_reason %}
+          <p class="reason">{{ view.candidate.extract_reason }}</p>
+        {% else %}
+          <div class="signals">
+            <code>{{ view.candidate.signals.get('kind', view.candidate.signals.get('kinds', [])) }}</code>
+          </div>
+        {% endif %}
         {% if view.candidate.status == 'pending' %}
         <form class="actions" method="post" action="/candidates/{{ view.candidate.id }}/review">
           <button name="decision" value="approved" type="submit">Approve</button>

@@ -5,6 +5,9 @@ import time
 from pathlib import Path
 
 from clippy.audio.intensity import detect_audio_spikes
+from clippy.caption.generate import annotate_extracted_candidate
+from clippy.caption.reason import format_extract_reason
+from clippy.chat.models import ChatMessage
 from clippy.chat.signals import detect_chat_signals
 from clippy.config import Settings
 from clippy.detect.detector import coalesce_detections, combine_signal_events
@@ -86,11 +89,11 @@ def _process_vod_like(
     skipped_disk = 0
 
     for item in coalesced:
+        reason = format_extract_reason(item.signals)
         if not within_disk_budget(media_dir, settings.disk_budget_gb):
             skipped_disk += 1
             logger.warning("Disk budget exceeded; skipping remaining extracts")
-            # Still persist candidate without media
-            db.create_candidate(
+            candidate = db.create_candidate(
                 stream.id,
                 item.ts,
                 settings.pre_context_seconds,
@@ -98,6 +101,18 @@ def _process_vod_like(
                 item.signals,
                 item.score,
                 media_path=None,
+                extract_reason=reason,
+            )
+            _annotate_candidate(
+                db,
+                candidate.id,
+                media_path=None,
+                chat=ingest.chat,
+                source_ts=item.ts,
+                settings=settings,
+                streamer_display_name=ingest.display_name,
+                streamer_login=ingest.streamer_login,
+                extract_reason=reason,
             )
             continue
 
@@ -109,6 +124,7 @@ def _process_vod_like(
             item.signals,
             item.score,
             media_path=None,
+            extract_reason=reason,
         )
         start = max(0.0, item.ts - settings.pre_context_seconds)
         duration = settings.pre_context_seconds + settings.post_context_seconds
@@ -123,6 +139,17 @@ def _process_vod_like(
             )
             db.update_candidate_media(candidate.id, str(out))
             created += 1
+            _annotate_candidate(
+                db,
+                candidate.id,
+                media_path=out,
+                chat=ingest.chat,
+                source_ts=item.ts,
+                settings=settings,
+                streamer_display_name=ingest.display_name,
+                streamer_login=ingest.streamer_login,
+                extract_reason=reason,
+            )
         except Exception:
             logger.exception("Failed to extract candidate %s", candidate.id)
 
@@ -135,6 +162,40 @@ def _process_vod_like(
         "extracted": created,
         "skipped_disk": skipped_disk,
     }
+
+
+def _annotate_candidate(
+    db: Database,
+    candidate_id: int,
+    *,
+    media_path: Path | None,
+    chat: list[ChatMessage],
+    source_ts: float,
+    settings: Settings,
+    streamer_display_name: str,
+    streamer_login: str,
+    extract_reason: str,
+) -> None:
+    try:
+        caption, transcript = annotate_extracted_candidate(
+            media_path=media_path,
+            chat=chat,
+            source_ts=source_ts,
+            pre_context_seconds=settings.pre_context_seconds,
+            post_context_seconds=settings.post_context_seconds,
+            streamer_display_name=streamer_display_name,
+            streamer_login=streamer_login,
+            extract_reason=extract_reason,
+            settings=settings,
+        )
+        if caption or transcript:
+            db.update_candidate_caption(
+                candidate_id,
+                caption=caption,
+                transcript=transcript,
+            )
+    except Exception:
+        logger.exception("Failed to annotate candidate %s", candidate_id)
 
 
 def run_live_pipeline(

@@ -2,8 +2,15 @@
 {% block title %}Candidate #{{ view.candidate.id }}{% endblock %}
 {% block content %}
 <p><a href="/">← Back</a></p>
-<h1>Candidate #{{ view.candidate.id }}</h1>
+<h1>
+  {% if view.candidate.caption %}
+    {{ view.candidate.caption }}
+  {% else %}
+    Candidate #{{ view.candidate.id }}
+  {% endif %}
+</h1>
 <p class="sub">
+  #{{ view.candidate.id }} ·
   {{ view.streamer_display_name }} ({{ view.streamer_login }}) ·
   t={{ '%.1f'|format(view.candidate.source_ts) }}s ·
   score={{ '%.2f'|format(view.candidate.score) }} ·
@@ -17,13 +24,25 @@
 {% endif %}
 
 <section class="panel">
-  <h2>Signals</h2>
-  <pre>{{ view.candidate.signals | tojson(indent=2) }}</pre>
+  <h2>Why it was extracted</h2>
+  {% if view.candidate.extract_reason %}
+    <p>{{ view.candidate.extract_reason }}</p>
+  {% else %}
+    <p class="muted">No extract reason (older run).</p>
+  {% endif %}
+  <details>
+    <summary>Raw signals</summary>
+    <pre>{{ view.candidate.signals | tojson(indent=2) }}</pre>
+  </details>
 </section>
 
 <section class="panel">
   <h2>Transcript</h2>
-  <p class="muted">Placeholder — ASR not in MVP.</p>
+  {% if view.candidate.transcript %}
+    <p>{{ view.candidate.transcript }}</p>
+  {% else %}
+    <p class="muted">No transcript for this candidate.</p>
+  {% endif %}
 </section>
 
 {% if view.candidate.status == 'pending' %}

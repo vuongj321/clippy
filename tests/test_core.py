@@ -69,10 +69,23 @@ def test_database_review_roundtrip(tmp_path: Path):
         post_context_seconds=30,
         signals={"kind": "keyword"},
         score=0.8,
+        extract_reason="Chat asked to clip it",
+    )
+    db.update_candidate_caption(
+        cand.id,
+        caption="Jason reacts to GG EZ",
+        transcript="I can't believe that",
     )
     db.review_candidate(cand.id, "approved")
     stats = db.stats()
     assert stats["approved"] == 1
     assert stats["approve_rate"] == 1.0
+    loaded = db.get_candidate(cand.id)
+    assert loaded is not None
+    assert loaded.extract_reason == "Chat asked to clip it"
+    assert loaded.caption == "Jason reacts to GG EZ"
     exported = db.export_reviews()
     assert exported[0]["decision"] == "approved"
+    assert exported[0]["caption"] == "Jason reacts to GG EZ"
+    assert exported[0]["extract_reason"] == "Chat asked to clip it"
+    assert exported[0]["transcript"] == "I can't believe that"
