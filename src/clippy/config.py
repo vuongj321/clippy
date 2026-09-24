@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     asr_model: str = "whisper-1"
     caption_model: str = "gpt-4o-mini"
     caption_max_chat_messages: int = 40
+    caption_max_per_run: int = 20
 
     host: str = "127.0.0.1"
     port: int = 8000

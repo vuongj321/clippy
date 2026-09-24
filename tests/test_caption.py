@@ -8,6 +8,11 @@ from clippy.caption.generate import annotate_extracted_candidate, generate_capti
 from clippy.caption.reason import format_extract_reason
 from clippy.chat.models import ChatMessage
 from clippy.config import Settings
+from clippy.pipeline import (
+    _AnnotationJob,
+    _annotate_extracted_candidates,
+    _select_annotation_jobs,
+)
 from clippy.store.db import Database
 
 
@@ -118,6 +123,64 @@ def test_generate_caption_parses_response(monkeypatch):
         api_key="test-key",
     )
     assert caption == "Jason reacts to GG EZ"
+
+
+def test_select_annotation_jobs_ranks_by_score_then_caps():
+    jobs = [
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.4, "r"),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9, "r"),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.9, "r"),
+    ]
+    selected = _select_annotation_jobs(jobs, max_per_run=2)
+    assert [job.candidate_id for job in selected] == [2, 3]
+
+
+def test_select_annotation_jobs_zero_cap():
+    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9, "r")]
+    assert _select_annotation_jobs(jobs, max_per_run=0) == []
+
+
+def test_annotate_extracted_skips_without_api_key(monkeypatch):
+    called: list[int] = []
+    monkeypatch.setattr(
+        "clippy.pipeline._annotate_candidate",
+        lambda *a, **k: called.append(1),
+    )
+    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9, "r")]
+    count = _annotate_extracted_candidates(
+        object(),  # type: ignore[arg-type]
+        jobs,
+        chat=[],
+        settings=Settings(openai_api_key=""),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert count == 0
+    assert called == []
+
+
+def test_annotate_extracted_respects_cap(monkeypatch):
+    called: list[int] = []
+
+    def fake_annotate(db, candidate_id, **kwargs):
+        called.append(candidate_id)
+
+    monkeypatch.setattr("clippy.pipeline._annotate_candidate", fake_annotate)
+    jobs = [
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.2, "r"),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9, "r"),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.5, "r"),
+    ]
+    count = _annotate_extracted_candidates(
+        object(),  # type: ignore[arg-type]
+        jobs,
+        chat=[],
+        settings=Settings(openai_api_key="sk-test", caption_max_per_run=2),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert count == 2
+    assert called == [2, 3]
 
 
 def test_annotate_skips_without_api_key():

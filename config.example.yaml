@@ -43,6 +43,7 @@ ffprobe_path: ffprobe
 # asr_model: whisper-1
 # caption_model: gpt-4o-mini
 # caption_max_chat_messages: 40
+# caption_max_per_run: 20
 
 host: 127.0.0.1
 port: 8000
