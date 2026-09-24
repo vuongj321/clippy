@@ -14,8 +14,6 @@ from clippy.config import Settings
 
 logger = logging.getLogger(__name__)
 
-_MISSING_KEY_LOGGED = False
-
 CAPTION_SYSTEM_PROMPT = """You write short clip captions for a Twitch highlight review tool.
 Write 3-10 words describing what is happening in the clip.
 Use the streamer name when it helps.
@@ -88,8 +86,6 @@ def annotate_extracted_candidate(
     """
     Return (caption, transcript). Never raises for missing keys or API errors.
     """
-    global _MISSING_KEY_LOGGED
-
     start = max(0.0, source_ts - pre_context_seconds)
     end = source_ts + post_context_seconds
     chat_context = build_chat_context(
@@ -102,11 +98,6 @@ def annotate_extracted_candidate(
 
     api_key = (settings.openai_api_key or "").strip()
     if not api_key:
-        if not _MISSING_KEY_LOGGED:
-            logger.info(
-                "CLIPPY_OPENAI_API_KEY is unset; skipping ASR and caption generation"
-            )
-            _MISSING_KEY_LOGGED = True
         return None, None
 
     transcript: str | None = None

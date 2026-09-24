@@ -184,9 +184,6 @@ def test_annotate_extracted_respects_cap(monkeypatch):
 
 
 def test_annotate_skips_without_api_key():
-    import clippy.caption.generate as generate
-
-    generate._MISSING_KEY_LOGGED = False
     caption, transcript = annotate_extracted_candidate(
         media_path=None,
         chat=[],
