@@ -48,6 +48,9 @@ CREATE TABLE IF NOT EXISTS candidates (
     signals TEXT NOT NULL DEFAULT '{}',
     score REAL NOT NULL DEFAULT 0,
     media_path TEXT,
+    extract_reason TEXT,
+    caption TEXT,
+    transcript TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending', 'approved', 'rejected')),
     created_at TEXT NOT NULL
@@ -67,6 +70,13 @@ CREATE INDEX IF NOT EXISTS idx_candidates_stream_score
 CREATE INDEX IF NOT EXISTS idx_candidates_status
     ON candidates(status);
 """
+
+# SQLite cannot bind identifiers. These DDL strings are module constants only.
+CANDIDATE_COLUMN_MIGRATIONS = (
+    ("extract_reason", "ALTER TABLE candidates ADD COLUMN extract_reason TEXT"),
+    ("caption", "ALTER TABLE candidates ADD COLUMN caption TEXT"),
+    ("transcript", "ALTER TABLE candidates ADD COLUMN transcript TEXT"),
+)
 
 
 def utc_now() -> str:
@@ -104,6 +114,9 @@ class Candidate:
     media_path: str | None
     status: CandidateStatus
     created_at: str
+    extract_reason: str | None = None
+    caption: str | None = None
+    transcript: str | None = None
 
 
 @dataclass
@@ -152,6 +165,16 @@ class Database:
     def _init_schema(self) -> None:
         with self.connection() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        existing = {
+            row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
+        }
+        for name, ddl in CANDIDATE_COLUMN_MIGRATIONS:
+            if name not in existing:
+                conn.execute(ddl)
 
     def get_or_create_streamer(self, login: str, display_name: str | None = None) -> Streamer:
         login = login.lower().strip()
@@ -217,6 +240,9 @@ class Database:
         signals: dict[str, Any],
         score: float,
         media_path: str | None = None,
+        extract_reason: str | None = None,
+        caption: str | None = None,
+        transcript: str | None = None,
     ) -> Candidate:
         now = utc_now()
         with self.connection() as conn:
@@ -224,8 +250,9 @@ class Database:
                 """
                 INSERT INTO candidates (
                     stream_id, source_ts, pre_context_seconds, post_context_seconds,
-                    signals, score, media_path, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                    signals, score, media_path, status, created_at,
+                    extract_reason, caption, transcript
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                 """,
                 (
                     stream_id,
@@ -236,6 +263,9 @@ class Database:
                     score,
                     media_path,
                     now,
+                    extract_reason,
+                    caption,
+                    transcript,
                 ),
             )
             return self._candidate_from_row(
@@ -249,6 +279,30 @@ class Database:
             conn.execute(
                 "UPDATE candidates SET media_path = ? WHERE id = ?",
                 (media_path, candidate_id),
+            )
+
+    def update_candidate_caption(
+        self,
+        candidate_id: int,
+        *,
+        caption: str | None = None,
+        transcript: str | None = None,
+    ) -> None:
+        assignments: list[str] = []
+        params: list[Any] = []
+        if caption is not None:
+            assignments.append("caption = ?")
+            params.append(caption)
+        if transcript is not None:
+            assignments.append("transcript = ?")
+            params.append(transcript)
+        if not assignments:
+            return
+        params.append(candidate_id)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE candidates SET {', '.join(assignments)} WHERE id = ?",
+                params,
             )
 
     def get_candidate(self, candidate_id: int) -> Candidate | None:
@@ -389,6 +443,9 @@ class Database:
                     c.signals,
                     c.status,
                     c.media_path,
+                    c.extract_reason,
+                    c.caption,
+                    c.transcript,
                     s.id AS stream_id,
                     s.mode,
                     s.vod_id,
@@ -427,6 +484,9 @@ class Database:
             media_path=row["media_path"],
             status=row["status"],
             created_at=row["created_at"],
+            extract_reason=row["extract_reason"],
+            caption=row["caption"],
+            transcript=row["transcript"],
         )
         review = None
         if row["review_id"] is not None:

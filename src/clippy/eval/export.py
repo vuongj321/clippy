@@ -33,6 +33,9 @@ def export_reviews_csv(db: Database, path: Path) -> Path:
         "vod_id",
         "status",
         "media_path",
+        "caption",
+        "extract_reason",
+        "transcript",
     ]
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")

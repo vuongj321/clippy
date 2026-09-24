@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     twitch_irc_nick: str = ""
     twitch_irc_oauth: str = ""
 
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    asr_model: str = "whisper-1"
+    caption_model: str = "gpt-4o-mini"
+    caption_max_chat_messages: int = 40
+    caption_max_per_run: int = 20
+
     host: str = "127.0.0.1"
     port: int = 8000
 

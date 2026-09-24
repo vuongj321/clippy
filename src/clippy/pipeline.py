@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from clippy.audio.intensity import detect_audio_spikes
+from clippy.caption.generate import annotate_extracted_candidate
+from clippy.caption.reason import format_extract_reason
+from clippy.chat.models import ChatMessage
 from clippy.chat.signals import detect_chat_signals
 from clippy.config import Settings
 from clippy.detect.detector import coalesce_detections, combine_signal_events
@@ -14,6 +18,14 @@ from clippy.ingest.vod import VodIngestResult, ingest_local_vod
 from clippy.store.db import Database
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _AnnotationJob:
+    candidate_id: int
+    media_path: Path
+    source_ts: float
+    score: float
 
 
 def run_vod_pipeline(
@@ -84,12 +96,13 @@ def _process_vod_like(
     media_dir = settings.resolved_media_dir()
     created = 0
     skipped_disk = 0
+    extracted_jobs: list[_AnnotationJob] = []
 
     for item in coalesced:
+        reason = format_extract_reason(item.signals)
         if not within_disk_budget(media_dir, settings.disk_budget_gb):
             skipped_disk += 1
             logger.warning("Disk budget exceeded; skipping remaining extracts")
-            # Still persist candidate without media
             db.create_candidate(
                 stream.id,
                 item.ts,
@@ -98,6 +111,7 @@ def _process_vod_like(
                 item.signals,
                 item.score,
                 media_path=None,
+                extract_reason=reason,
             )
             continue
 
@@ -109,6 +123,7 @@ def _process_vod_like(
             item.signals,
             item.score,
             media_path=None,
+            extract_reason=reason,
         )
         start = max(0.0, item.ts - settings.pre_context_seconds)
         duration = settings.pre_context_seconds + settings.post_context_seconds
@@ -123,8 +138,25 @@ def _process_vod_like(
             )
             db.update_candidate_media(candidate.id, str(out))
             created += 1
+            extracted_jobs.append(
+                _AnnotationJob(
+                    candidate_id=candidate.id,
+                    media_path=out,
+                    source_ts=item.ts,
+                    score=item.score,
+                )
+            )
         except Exception:
             logger.exception("Failed to extract candidate %s", candidate.id)
+
+    annotated = _run_caption_pass(
+        db,
+        extracted_jobs,
+        chat=ingest.chat,
+        settings=settings,
+        streamer_display_name=ingest.display_name,
+        streamer_login=ingest.streamer_login,
+    )
 
     return {
         "stream_id": stream.id,
@@ -134,7 +166,96 @@ def _process_vod_like(
         "candidates": len(coalesced),
         "extracted": created,
         "skipped_disk": skipped_disk,
+        "annotated": annotated,
     }
+
+
+def _select_annotation_jobs(
+    jobs: list[_AnnotationJob],
+    *,
+    max_per_run: int,
+) -> list[_AnnotationJob]:
+    if max_per_run <= 0 or not jobs:
+        return []
+    ranked = sorted(jobs, key=lambda job: (-job.score, job.source_ts, job.candidate_id))
+    return ranked[:max_per_run]
+
+
+def _run_caption_pass(
+    db: Database,
+    jobs: list[_AnnotationJob],
+    *,
+    chat: list[ChatMessage],
+    settings: Settings,
+    streamer_display_name: str,
+    streamer_login: str,
+) -> int:
+    if not (settings.openai_api_key or "").strip():
+        logger.info("CLIPPY_OPENAI_API_KEY is unset; skipping ASR and caption generation")
+        return 0
+    selected = _select_annotation_jobs(jobs, max_per_run=settings.caption_max_per_run)
+    if not selected:
+        if jobs and settings.caption_max_per_run <= 0:
+            logger.info(
+                "caption_max_per_run=%s; skipping caption generation",
+                settings.caption_max_per_run,
+            )
+        return 0
+    if len(selected) < len(jobs):
+        logger.info(
+            "Annotating %d of %d extracted candidates (caption_max_per_run=%s)",
+            len(selected),
+            len(jobs),
+            settings.caption_max_per_run,
+        )
+    annotated = 0
+    for job in selected:
+        if _save_caption(
+            db,
+            job.candidate_id,
+            media_path=job.media_path,
+            chat=chat,
+            source_ts=job.source_ts,
+            settings=settings,
+            streamer_display_name=streamer_display_name,
+            streamer_login=streamer_login,
+        ):
+            annotated += 1
+    return annotated
+
+
+def _save_caption(
+    db: Database,
+    candidate_id: int,
+    *,
+    media_path: Path,
+    chat: list[ChatMessage],
+    source_ts: float,
+    settings: Settings,
+    streamer_display_name: str,
+    streamer_login: str,
+) -> bool:
+    try:
+        caption, transcript = annotate_extracted_candidate(
+            media_path=media_path,
+            chat=chat,
+            source_ts=source_ts,
+            pre_context_seconds=settings.pre_context_seconds,
+            post_context_seconds=settings.post_context_seconds,
+            streamer_display_name=streamer_display_name,
+            streamer_login=streamer_login,
+            settings=settings,
+        )
+        if caption or transcript:
+            db.update_candidate_caption(
+                candidate_id,
+                caption=caption,
+                transcript=transcript,
+            )
+        return bool(caption)
+    except Exception:
+        logger.exception("Failed to annotate candidate %s", candidate_id)
+        return False
 
 
 def run_live_pipeline(
