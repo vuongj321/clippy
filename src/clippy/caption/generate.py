@@ -31,7 +31,6 @@ def generate_caption(
     *,
     streamer_display_name: str,
     streamer_login: str,
-    extract_reason: str,
     transcript: str | None,
     chat_context: dict[str, Any],
     api_key: str,
@@ -44,7 +43,6 @@ def generate_caption(
     user_payload = {
         "streamer_display_name": streamer_display_name,
         "streamer_login": streamer_login,
-        "extract_reason_do_not_repeat": extract_reason,
         "transcript": transcript or "",
         "chat": chat_context,
     }
@@ -86,7 +84,6 @@ def annotate_extracted_candidate(
     post_context_seconds: float,
     streamer_display_name: str,
     streamer_login: str,
-    extract_reason: str,
     settings: Settings,
 ) -> tuple[str | None, str | None]:
     """
@@ -123,7 +120,6 @@ def annotate_extracted_candidate(
         caption = generate_caption(
             streamer_display_name=streamer_display_name,
             streamer_login=streamer_login,
-            extract_reason=extract_reason,
             transcript=transcript,
             chat_context=chat_context,
             api_key=api_key,

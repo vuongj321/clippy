@@ -64,7 +64,6 @@ def build_chat_context(
     keywords = keywords or []
     window = slice_chat(messages, start=start, end=end)
     counts: Counter[str] = Counter()
-    keyword_hits: list[dict[str, Any]] = []
     keyword_kept: list[ChatMessage] = []
     other_kept: list[ChatMessage] = []
 
@@ -74,7 +73,6 @@ def build_chat_context(
             continue
         counts[text.lower()] += 1
         if has_keyword(text, keywords):
-            keyword_hits.append({"ts": msg.ts, "user": msg.user, "text": msg.text})
             keyword_kept.append(msg)
         elif not is_emote_only(text):
             other_kept.append(msg)
@@ -98,7 +96,11 @@ def build_chat_context(
     ]
     return {
         "messages": [{"ts": m.ts, "user": m.user, "text": m.text} for m in kept],
-        "keyword_hits": keyword_hits[: max_messages],
+        "keyword_hits": [
+            {"ts": m.ts, "user": m.user, "text": m.text}
+            for m in kept
+            if has_keyword(m.text, keywords)
+        ],
         "repeated": repeated,
         "window_count": len(window),
     }

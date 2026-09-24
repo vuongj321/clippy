@@ -26,7 +26,6 @@ class _AnnotationJob:
     media_path: Path
     source_ts: float
     score: float
-    extract_reason: str
 
 
 def run_vod_pipeline(
@@ -145,7 +144,6 @@ def _process_vod_like(
                     media_path=out,
                     source_ts=item.ts,
                     score=item.score,
-                    extract_reason=reason,
                 )
             )
         except Exception:
@@ -210,8 +208,9 @@ def _run_caption_pass(
             len(jobs),
             settings.caption_max_per_run,
         )
+    annotated = 0
     for job in selected:
-        _save_caption(
+        if _save_caption(
             db,
             job.candidate_id,
             media_path=job.media_path,
@@ -220,9 +219,9 @@ def _run_caption_pass(
             settings=settings,
             streamer_display_name=streamer_display_name,
             streamer_login=streamer_login,
-            extract_reason=job.extract_reason,
-        )
-    return len(selected)
+        ):
+            annotated += 1
+    return annotated
 
 
 def _save_caption(
@@ -235,8 +234,7 @@ def _save_caption(
     settings: Settings,
     streamer_display_name: str,
     streamer_login: str,
-    extract_reason: str,
-) -> None:
+) -> bool:
     try:
         caption, transcript = annotate_extracted_candidate(
             media_path=media_path,
@@ -246,7 +244,6 @@ def _save_caption(
             post_context_seconds=settings.post_context_seconds,
             streamer_display_name=streamer_display_name,
             streamer_login=streamer_login,
-            extract_reason=extract_reason,
             settings=settings,
         )
         if caption or transcript:
@@ -255,8 +252,10 @@ def _save_caption(
                 caption=caption,
                 transcript=transcript,
             )
+        return bool(caption)
     except Exception:
         logger.exception("Failed to annotate candidate %s", candidate_id)
+        return False
 
 
 def run_live_pipeline(

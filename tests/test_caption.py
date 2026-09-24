@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from clippy.config import Settings
 from clippy.pipeline import (
     _AnnotationJob,
     _run_caption_pass,
+    _save_caption,
     _select_annotation_jobs,
 )
 from clippy.store.db import Database
@@ -149,6 +151,11 @@ def test_build_chat_context_caps_and_keeps_keywords():
     )
     assert len(ctx["messages"]) <= 5
     assert any(m["text"] == "please clip it" for m in ctx["messages"])
+    message_keys = {(m["ts"], m["user"], m["text"]) for m in ctx["messages"]}
+    assert all(
+        (hit["ts"], hit["user"], hit["text"]) in message_keys
+        for hit in ctx["keyword_hits"]
+    )
 
 
 def test_build_chat_context_caps_keyword_pile_on():
@@ -167,6 +174,7 @@ def test_build_chat_context_caps_keyword_pile_on():
     )
     assert len(ctx["messages"]) == 5
     assert all(m["text"] == "clip that" for m in ctx["messages"])
+    assert ctx["keyword_hits"] == ctx["messages"]
 
 
 def test_has_keyword_requires_word_boundary():
@@ -187,6 +195,8 @@ def test_strip_wrapping_quotes_keeps_apostrophe():
 
 
 def test_generate_caption_parses_response(monkeypatch):
+    captured: dict = {}
+
     class FakeResp:
         def raise_for_status(self) -> None:
             return None
@@ -194,30 +204,36 @@ def test_generate_caption_parses_response(monkeypatch):
         def json(self) -> dict:
             return {"choices": [{"message": {"content": '"Jason reacts to GG EZ"'}}]}
 
-    monkeypatch.setattr("clippy.caption.generate.httpx.post", lambda *a, **k: FakeResp())
+    def fake_post(*_a, **kwargs):
+        captured.update(kwargs)
+        return FakeResp()
+
+    monkeypatch.setattr("clippy.caption.generate.httpx.post", fake_post)
     caption = generate_caption(
         streamer_display_name="Jason",
         streamer_login="jason",
-        extract_reason="Chat asked to clip it",
         transcript="I can't believe that",
         chat_context={"messages": []},
         api_key="test-key",
     )
     assert caption == "Jason reacts to GG EZ"
+    payload = json.loads(captured["json"]["messages"][1]["content"])
+    assert "extract_reason" not in payload
+    assert "extract_reason_do_not_repeat" not in payload
 
 
 def test_select_annotation_jobs_ranks_by_score_then_caps():
     jobs = [
-        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.4, "r"),
-        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9, "r"),
-        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.9, "r"),
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.4),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.9),
     ]
     selected = _select_annotation_jobs(jobs, max_per_run=2)
     assert [job.candidate_id for job in selected] == [2, 3]
 
 
 def test_select_annotation_jobs_zero_cap():
-    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9, "r")]
+    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9)]
     assert _select_annotation_jobs(jobs, max_per_run=0) == []
 
 
@@ -227,7 +243,7 @@ def test_run_caption_pass_skips_without_api_key(monkeypatch):
         "clippy.pipeline._save_caption",
         lambda *a, **k: called.append(1),
     )
-    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9, "r")]
+    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9)]
     count = _run_caption_pass(
         object(),  # type: ignore[arg-type]
         jobs,
@@ -245,12 +261,13 @@ def test_run_caption_pass_respects_cap(monkeypatch):
 
     def fake_save(db, candidate_id, **kwargs):
         called.append(candidate_id)
+        return True
 
     monkeypatch.setattr("clippy.pipeline._save_caption", fake_save)
     jobs = [
-        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.2, "r"),
-        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9, "r"),
-        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.5, "r"),
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.2),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.5),
     ]
     count = _run_caption_pass(
         object(),  # type: ignore[arg-type]
@@ -264,6 +281,70 @@ def test_run_caption_pass_respects_cap(monkeypatch):
     assert called == [2, 3]
 
 
+def test_run_caption_pass_counts_only_saved_captions(monkeypatch):
+    def fake_save(db, candidate_id, **kwargs):
+        return candidate_id == 2
+
+    monkeypatch.setattr("clippy.pipeline._save_caption", fake_save)
+    jobs = [
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.2),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.5),
+    ]
+    count = _run_caption_pass(
+        object(),  # type: ignore[arg-type]
+        jobs,
+        chat=[],
+        settings=Settings(openai_api_key="sk-test", caption_max_per_run=3),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert count == 1
+
+
+def test_save_caption_returns_false_without_caption(monkeypatch):
+    written: list[tuple[int, dict]] = []
+
+    class FakeDb:
+        def update_candidate_caption(self, candidate_id, **kwargs):
+            written.append((candidate_id, kwargs))
+
+    monkeypatch.setattr(
+        "clippy.pipeline.annotate_extracted_candidate",
+        lambda **k: (None, "heard something"),
+    )
+    ok = _save_caption(
+        FakeDb(),  # type: ignore[arg-type]
+        7,
+        media_path=Path("a.mp4"),
+        chat=[],
+        source_ts=1.0,
+        settings=Settings(openai_api_key="sk-test"),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert ok is False
+    assert written == [(7, {"caption": None, "transcript": "heard something"})]
+
+
+def test_save_caption_returns_false_on_exception(monkeypatch):
+    def boom(**kwargs):
+        raise RuntimeError("401")
+
+    monkeypatch.setattr("clippy.pipeline.annotate_extracted_candidate", boom)
+    ok = _save_caption(
+        object(),  # type: ignore[arg-type]
+        7,
+        media_path=Path("a.mp4"),
+        chat=[],
+        source_ts=1.0,
+        settings=Settings(openai_api_key="sk-test"),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert ok is False
+
+
 def test_annotate_skips_without_api_key():
     caption, transcript = annotate_extracted_candidate(
         media_path=None,
@@ -273,7 +354,6 @@ def test_annotate_skips_without_api_key():
         post_context_seconds=5.0,
         streamer_display_name="Jason",
         streamer_login="jason",
-        extract_reason="Chat asked to clip it",
         settings=Settings(openai_api_key=""),
     )
     assert caption is None
