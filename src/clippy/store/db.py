@@ -483,9 +483,9 @@ class Database:
             media_path=row["media_path"],
             status=row["status"],
             created_at=row["created_at"],
-            extract_reason=row["extract_reason"] if "extract_reason" in row.keys() else None,
-            caption=row["caption"] if "caption" in row.keys() else None,
-            transcript=row["transcript"] if "transcript" in row.keys() else None,
+            extract_reason=row["extract_reason"],
+            caption=row["caption"],
+            transcript=row["transcript"],
         )
         review = None
         if row["review_id"] is not None:

@@ -120,3 +120,24 @@ def test_update_candidate_caption_partial_does_not_null_other(tmp_path: Path):
     assert loaded is not None
     assert loaded.caption == "second caption"
     assert loaded.transcript == "keep this transcript"
+
+
+def test_candidate_view_reads_caption_fields(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(streamer.id, "vod")
+    cand = db.create_candidate(
+        stream.id,
+        source_ts=1.0,
+        pre_context_seconds=30,
+        post_context_seconds=30,
+        signals={"kind": "keyword"},
+        score=0.5,
+        extract_reason="Chat asked to clip it",
+    )
+    db.update_candidate_caption(cand.id, caption="cap", transcript="tr")
+    views = db.list_candidate_views(status=None)
+    assert views[0].candidate.id == cand.id
+    assert views[0].candidate.extract_reason == "Chat asked to clip it"
+    assert views[0].candidate.caption == "cap"
+    assert views[0].candidate.transcript == "tr"
