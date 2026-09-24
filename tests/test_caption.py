@@ -4,7 +4,12 @@ import sqlite3
 from pathlib import Path
 
 from clippy.caption.chat_context import build_chat_context, is_emote_only, slice_chat
-from clippy.caption.generate import annotate_extracted_candidate, generate_caption
+from clippy.caption.generate import (
+    _strip_wrapping_quotes,
+    annotate_extracted_candidate,
+    generate_caption,
+)
+from clippy.chat.keywords import has_keyword
 from clippy.caption.reason import format_extract_reason
 from clippy.chat.models import ChatMessage
 from clippy.config import Settings
@@ -162,6 +167,23 @@ def test_build_chat_context_caps_keyword_pile_on():
     )
     assert len(ctx["messages"]) == 5
     assert all(m["text"] == "clip that" for m in ctx["messages"])
+
+
+def test_has_keyword_requires_word_boundary():
+    keywords = ["clip it", "clip that", "clip this", "clip"]
+    assert has_keyword("please clip it", keywords)
+    assert has_keyword("CLIP THAT", keywords)
+    assert has_keyword("clip", keywords)
+    assert not has_keyword("clippers", keywords)
+    assert not has_keyword("unclipped", keywords)
+    assert not has_keyword("eclipse", keywords)
+
+
+def test_strip_wrapping_quotes_keeps_apostrophe():
+    assert _strip_wrapping_quotes('"Jason reacts to GG EZ"') == "Jason reacts to GG EZ"
+    assert _strip_wrapping_quotes("'Jason reacts'") == "Jason reacts"
+    assert _strip_wrapping_quotes("Jason's") == "Jason's"
+    assert _strip_wrapping_quotes("  'wow'  ") == "wow"
 
 
 def test_generate_caption_parses_response(monkeypatch):

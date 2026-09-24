@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
+from clippy.chat.keywords import has_keyword
 from clippy.chat.models import ChatMessage
 
 _EMOTE_ONLY = {
@@ -51,11 +52,6 @@ def is_emote_only(text: str) -> bool:
     return not any(ch.isalnum() for ch in token)
 
 
-def _has_keyword(text: str, keywords: list[str]) -> bool:
-    lowered = text.lower()
-    return any(k.lower() in lowered for k in keywords)
-
-
 def build_chat_context(
     messages: list[ChatMessage],
     *,
@@ -77,7 +73,7 @@ def build_chat_context(
         if not text:
             continue
         counts[text.lower()] += 1
-        if _has_keyword(text, keywords):
+        if has_keyword(text, keywords):
             keyword_hits.append({"ts": msg.ts, "user": msg.user, "text": msg.text})
             keyword_kept.append(msg)
         elif not is_emote_only(text):

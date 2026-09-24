@@ -67,8 +67,14 @@ def generate_caption(
     if not choices:
         return ""
     content = choices[0].get("message", {}).get("content") or ""
-    caption = str(content).strip().strip('"').strip("'")
-    return caption
+    return _strip_wrapping_quotes(str(content))
+
+
+def _strip_wrapping_quotes(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        return text[1:-1].strip()
+    return text
 
 
 def annotate_extracted_candidate(
