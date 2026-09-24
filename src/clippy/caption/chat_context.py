@@ -85,6 +85,9 @@ def build_chat_context(
 
     if len(keyword_kept) + len(other_kept) > max_messages:
         mid = (start + end) / 2.0
+        if len(keyword_kept) > max_messages:
+            keyword_kept.sort(key=lambda m: abs(m.ts - mid))
+            keyword_kept = keyword_kept[:max_messages]
         other_kept.sort(key=lambda m: abs(m.ts - mid))
         needed = max(0, max_messages - len(keyword_kept))
         kept = keyword_kept + other_kept[:needed]

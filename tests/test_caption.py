@@ -146,6 +146,24 @@ def test_build_chat_context_caps_and_keeps_keywords():
     assert any(m["text"] == "please clip it" for m in ctx["messages"])
 
 
+def test_build_chat_context_caps_keyword_pile_on():
+    messages = [
+        ChatMessage(ts=float(i), user="u", text="clip that") for i in range(20)
+    ]
+    messages.extend(
+        ChatMessage(ts=20.0 + i, user="u", text=f"normal {i}") for i in range(20)
+    )
+    ctx = build_chat_context(
+        messages,
+        start=0.0,
+        end=40.0,
+        keywords=["clip that"],
+        max_messages=5,
+    )
+    assert len(ctx["messages"]) == 5
+    assert all(m["text"] == "clip that" for m in ctx["messages"])
+
+
 def test_generate_caption_parses_response(monkeypatch):
     class FakeResp:
         def raise_for_status(self) -> None:
