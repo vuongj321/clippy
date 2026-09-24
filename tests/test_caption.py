@@ -10,7 +10,7 @@ from clippy.chat.models import ChatMessage
 from clippy.config import Settings
 from clippy.pipeline import (
     _AnnotationJob,
-    _annotate_extracted_candidates,
+    _run_caption_pass,
     _select_annotation_jobs,
 )
 from clippy.store.db import Database
@@ -181,14 +181,14 @@ def test_select_annotation_jobs_zero_cap():
     assert _select_annotation_jobs(jobs, max_per_run=0) == []
 
 
-def test_annotate_extracted_skips_without_api_key(monkeypatch):
+def test_run_caption_pass_skips_without_api_key(monkeypatch):
     called: list[int] = []
     monkeypatch.setattr(
-        "clippy.pipeline._annotate_candidate",
+        "clippy.pipeline._save_caption",
         lambda *a, **k: called.append(1),
     )
     jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9, "r")]
-    count = _annotate_extracted_candidates(
+    count = _run_caption_pass(
         object(),  # type: ignore[arg-type]
         jobs,
         chat=[],
@@ -200,19 +200,19 @@ def test_annotate_extracted_skips_without_api_key(monkeypatch):
     assert called == []
 
 
-def test_annotate_extracted_respects_cap(monkeypatch):
+def test_run_caption_pass_respects_cap(monkeypatch):
     called: list[int] = []
 
-    def fake_annotate(db, candidate_id, **kwargs):
+    def fake_save(db, candidate_id, **kwargs):
         called.append(candidate_id)
 
-    monkeypatch.setattr("clippy.pipeline._annotate_candidate", fake_annotate)
+    monkeypatch.setattr("clippy.pipeline._save_caption", fake_save)
     jobs = [
         _AnnotationJob(1, Path("a.mp4"), 10.0, 0.2, "r"),
         _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9, "r"),
         _AnnotationJob(3, Path("c.mp4"), 30.0, 0.5, "r"),
     ]
-    count = _annotate_extracted_candidates(
+    count = _run_caption_pass(
         object(),  # type: ignore[arg-type]
         jobs,
         chat=[],

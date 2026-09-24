@@ -151,7 +151,7 @@ def _process_vod_like(
         except Exception:
             logger.exception("Failed to extract candidate %s", candidate.id)
 
-    annotated = _annotate_extracted_candidates(
+    annotated = _run_caption_pass(
         db,
         extracted_jobs,
         chat=ingest.chat,
@@ -183,7 +183,7 @@ def _select_annotation_jobs(
     return ranked[:max_per_run]
 
 
-def _annotate_extracted_candidates(
+def _run_caption_pass(
     db: Database,
     jobs: list[_AnnotationJob],
     *,
@@ -211,7 +211,7 @@ def _annotate_extracted_candidates(
             settings.caption_max_per_run,
         )
     for job in selected:
-        _annotate_candidate(
+        _save_caption(
             db,
             job.candidate_id,
             media_path=job.media_path,
@@ -225,7 +225,7 @@ def _annotate_extracted_candidates(
     return len(selected)
 
 
-def _annotate_candidate(
+def _save_caption(
     db: Database,
     candidate_id: int,
     *,
