@@ -91,33 +91,35 @@ def _format_keyword(event: dict[str, Any] | None) -> str:
     return f"Chat asked to clip it ({quoted})"
 
 
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _format_rate_spike(event: dict[str, Any] | None) -> str:
+    fallback = "Chat rate jumped vs the last minute"
     if not event:
-        return "Chat rate jumped vs the last minute"
-    multiplier = event.get("multiplier")
+        return fallback
+    multiplier = _as_float(event.get("multiplier"))
     if multiplier is None:
-        window = event.get("window_rate")
-        baseline = event.get("baseline_rate")
-        if window and baseline:
-            try:
-                multiplier = float(window) / float(baseline)
-            except (TypeError, ValueError, ZeroDivisionError):
-                multiplier = None
-    if multiplier is not None:
-        try:
-            return f"Chat rate jumped {float(multiplier):.1f}x vs the last minute"
-        except (TypeError, ValueError):
-            pass
-    return "Chat rate jumped vs the last minute"
+        window = _as_float(event.get("window_rate"))
+        baseline = _as_float(event.get("baseline_rate"))
+        if window is not None and baseline is not None and baseline != 0.0:
+            multiplier = window / baseline
+    if multiplier is None:
+        return fallback
+    return f"Chat rate jumped {multiplier:.1f}x vs the last minute"
 
 
 def _format_audio_spike(event: dict[str, Any] | None) -> str:
+    fallback = "Audio got louder than the recent baseline"
     if not event:
-        return "Audio got louder than the recent baseline"
-    multiplier = event.get("multiplier")
-    if multiplier is not None:
-        try:
-            return f"Audio got {float(multiplier):.1f}x louder than the recent baseline"
-        except (TypeError, ValueError):
-            pass
-    return "Audio got louder than the recent baseline"
+        return fallback
+    multiplier = _as_float(event.get("multiplier"))
+    if multiplier is None:
+        return fallback
+    return f"Audio got {multiplier:.1f}x louder than the recent baseline"

@@ -61,6 +61,32 @@ def test_format_extract_reason_empty():
     assert format_extract_reason({}) == "Flagged by detection signals"
 
 
+def test_format_rate_spike_derives_multiplier_from_rates():
+    text = format_extract_reason(
+        {"kind": "rate_spike", "window_rate": 4.0, "baseline_rate": 2.0}
+    )
+    assert "2.0x" in text
+
+
+def test_format_rate_spike_treats_zero_window_as_present():
+    text = format_extract_reason(
+        {"kind": "rate_spike", "window_rate": 0.0, "baseline_rate": 1.0}
+    )
+    assert "0.0x" in text
+
+
+def test_format_rate_spike_zero_baseline_uses_fallback():
+    text = format_extract_reason(
+        {"kind": "rate_spike", "window_rate": 3.0, "baseline_rate": 0.0}
+    )
+    assert text == "Chat rate jumped vs the last minute"
+
+
+def test_format_audio_spike_bad_multiplier_uses_fallback():
+    text = format_extract_reason({"kind": "intensity_spike", "multiplier": "loud"})
+    assert text == "Audio got louder than the recent baseline"
+
+
 def test_slice_and_despam_chat():
     messages = [
         ChatMessage(ts=1.0, user="a", text="hello there"),
