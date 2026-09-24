@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+_KIND_PRIORITY = ("keyword", "rate_spike", "intensity_spike", "chat_audio")
+
 
 def format_extract_reason(signals: dict[str, Any] | None) -> str:
     """Turn coalesced candidate signals into a short human-readable reason."""
@@ -22,9 +24,9 @@ def format_extract_reason(signals: dict[str, Any] | None) -> str:
         parts.append(_format_audio_spike(audio))
 
     if not parts:
-        kind = signals.get("kind") or (next(iter(kinds), None) if kinds else None)
+        kind = _fallback_kind(signals, kinds)
         if kind:
-            return f"Flagged by {str(kind).replace('_', ' ')} signal"
+            return f"Flagged by {kind.replace('_', ' ')} signal"
         return "Flagged by detection signals"
 
     if len(parts) == 1:
@@ -32,6 +34,16 @@ def format_extract_reason(signals: dict[str, Any] | None) -> str:
     if len(parts) == 2:
         return f"{parts[0]}; {parts[1]}"
     return f"{parts[0]}; {parts[1]}; {parts[2]}"
+
+
+def _fallback_kind(signals: dict[str, Any], kinds: set[str]) -> str | None:
+    kind = signals.get("kind")
+    if kind:
+        return str(kind)
+    for preferred in _KIND_PRIORITY:
+        if preferred in kinds:
+            return preferred
+    return min(kinds) if kinds else None
 
 
 def _all_kinds(signals: dict[str, Any]) -> set[str]:

@@ -61,6 +61,21 @@ def test_format_extract_reason_empty():
     assert format_extract_reason({}) == "Flagged by detection signals"
 
 
+def test_format_extract_reason_unknown_kinds_are_stable():
+    signals = {"kinds": ["zeta_alert", "alpha_ping"]}
+    assert format_extract_reason(signals) == "Flagged by alpha ping signal"
+
+
+def test_format_extract_reason_prefers_kind_field():
+    signals = {"kind": "custom_wave", "kinds": ["zeta_alert", "alpha_ping"]}
+    assert format_extract_reason(signals) == "Flagged by custom wave signal"
+
+
+def test_format_extract_reason_prefers_known_kind_in_set():
+    signals = {"kinds": ["zeta_alert", "chat_audio"]}
+    assert format_extract_reason(signals) == "Flagged by chat audio signal"
+
+
 def test_format_rate_spike_derives_multiplier_from_rates():
     text = format_extract_reason(
         {"kind": "rate_spike", "window_rate": 4.0, "baseline_rate": 2.0}
