@@ -89,3 +89,34 @@ def test_database_review_roundtrip(tmp_path: Path):
     assert exported[0]["caption"] == "Jason reacts to GG EZ"
     assert exported[0]["extract_reason"] == "Chat asked to clip it"
     assert exported[0]["transcript"] == "I can't believe that"
+
+
+def test_update_candidate_caption_partial_does_not_null_other(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(streamer.id, "vod")
+    cand = db.create_candidate(
+        stream.id,
+        source_ts=1.0,
+        pre_context_seconds=30,
+        post_context_seconds=30,
+        signals={"kind": "keyword"},
+        score=0.5,
+        extract_reason="Chat asked to clip it",
+    )
+    db.update_candidate_caption(
+        cand.id,
+        caption="first caption",
+        transcript="keep this transcript",
+    )
+    db.update_candidate_caption(cand.id, caption="second caption")
+    loaded = db.get_candidate(cand.id)
+    assert loaded is not None
+    assert loaded.caption == "second caption"
+    assert loaded.transcript == "keep this transcript"
+    assert loaded.extract_reason == "Chat asked to clip it"
+    db.update_candidate_caption(cand.id)
+    loaded = db.get_candidate(cand.id)
+    assert loaded is not None
+    assert loaded.caption == "second caption"
+    assert loaded.transcript == "keep this transcript"

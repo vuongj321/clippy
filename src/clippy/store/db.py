@@ -286,17 +286,17 @@ class Database:
         *,
         caption: str | None = None,
         transcript: str | None = None,
-        extract_reason: str | None = None,
     ) -> None:
         assignments: list[str] = []
         params: list[Any] = []
-        if extract_reason is not None:
-            assignments.append("extract_reason = ?")
-            params.append(extract_reason)
-        assignments.append("caption = ?")
-        params.append(caption)
-        assignments.append("transcript = ?")
-        params.append(transcript)
+        if caption is not None:
+            assignments.append("caption = ?")
+            params.append(caption)
+        if transcript is not None:
+            assignments.append("transcript = ?")
+            params.append(transcript)
+        if not assignments:
+            return
         params.append(candidate_id)
         with self.connection() as conn:
             conn.execute(
