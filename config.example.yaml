@@ -38,5 +38,12 @@ ffprobe_path: ffprobe
 # twitch_irc_nick: ""
 # twitch_irc_oauth: ""
 
+# Captions (also set CLIPPY_OPENAI_API_KEY in .env). Not burned into MP4s yet.
+# openai_base_url: https://api.openai.com/v1
+# asr_model: whisper-1
+# caption_model: gpt-4o-mini
+# caption_max_chat_messages: 40
+# caption_max_per_run: 20  # top-N extracted clips this run; the rest are never captioned
+
 host: 127.0.0.1
 port: 8000

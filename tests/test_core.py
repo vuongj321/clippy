@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clippy.chat.models import load_chat_json
+from clippy.chat.models import ChatMessage, load_chat_json
 from clippy.chat.signals import detect_chat_signals
 from clippy.detect.detector import RawDetection, coalesce_detections, combine_signal_events
 from clippy.store.db import Database
@@ -31,6 +31,20 @@ def test_chat_spike_and_keyword():
     assert any(e.kind == "rate_spike" for e in events) or any(
         e.kind == "keyword" for e in events
     )
+
+
+def test_detect_ignores_clip_substring():
+    messages = [
+        ChatMessage(ts=1.0, user="a", text="clippers are winning"),
+        ChatMessage(ts=2.0, user="b", text="unclipped vod"),
+        ChatMessage(ts=3.0, user="c", text="please clip it"),
+    ]
+    events = detect_chat_signals(
+        messages,
+        keywords=["clip it", "clip that", "clip this", "clip"],
+    )
+    texts = [e.details["text"] for e in events if e.kind == "keyword"]
+    assert texts == ["please clip it"]
 
 
 def test_coalesce_merges_nearby():
@@ -69,10 +83,75 @@ def test_database_review_roundtrip(tmp_path: Path):
         post_context_seconds=30,
         signals={"kind": "keyword"},
         score=0.8,
+        extract_reason="Chat asked to clip it",
+    )
+    db.update_candidate_caption(
+        cand.id,
+        caption="Jason reacts to GG EZ",
+        transcript="I can't believe that",
     )
     db.review_candidate(cand.id, "approved")
     stats = db.stats()
     assert stats["approved"] == 1
     assert stats["approve_rate"] == 1.0
+    loaded = db.get_candidate(cand.id)
+    assert loaded is not None
+    assert loaded.extract_reason == "Chat asked to clip it"
+    assert loaded.caption == "Jason reacts to GG EZ"
     exported = db.export_reviews()
     assert exported[0]["decision"] == "approved"
+    assert exported[0]["caption"] == "Jason reacts to GG EZ"
+    assert exported[0]["extract_reason"] == "Chat asked to clip it"
+    assert exported[0]["transcript"] == "I can't believe that"
+
+
+def test_update_candidate_caption_partial_does_not_null_other(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(streamer.id, "vod")
+    cand = db.create_candidate(
+        stream.id,
+        source_ts=1.0,
+        pre_context_seconds=30,
+        post_context_seconds=30,
+        signals={"kind": "keyword"},
+        score=0.5,
+        extract_reason="Chat asked to clip it",
+    )
+    db.update_candidate_caption(
+        cand.id,
+        caption="first caption",
+        transcript="keep this transcript",
+    )
+    db.update_candidate_caption(cand.id, caption="second caption")
+    loaded = db.get_candidate(cand.id)
+    assert loaded is not None
+    assert loaded.caption == "second caption"
+    assert loaded.transcript == "keep this transcript"
+    assert loaded.extract_reason == "Chat asked to clip it"
+    db.update_candidate_caption(cand.id)
+    loaded = db.get_candidate(cand.id)
+    assert loaded is not None
+    assert loaded.caption == "second caption"
+    assert loaded.transcript == "keep this transcript"
+
+
+def test_candidate_view_reads_caption_fields(tmp_path: Path):
+    db = Database(tmp_path / "test.db")
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(streamer.id, "vod")
+    cand = db.create_candidate(
+        stream.id,
+        source_ts=1.0,
+        pre_context_seconds=30,
+        post_context_seconds=30,
+        signals={"kind": "keyword"},
+        score=0.5,
+        extract_reason="Chat asked to clip it",
+    )
+    db.update_candidate_caption(cand.id, caption="cap", transcript="tr")
+    views = db.list_candidate_views(status=None)
+    assert views[0].candidate.id == cand.id
+    assert views[0].candidate.extract_reason == "Chat asked to clip it"
+    assert views[0].candidate.caption == "cap"
+    assert views[0].candidate.transcript == "tr"

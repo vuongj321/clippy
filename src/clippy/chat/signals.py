@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from clippy.chat.keywords import first_keyword
 from clippy.chat.models import ChatMessage
 
 
@@ -34,8 +35,7 @@ def detect_chat_signals(
 
     # Keyword hits
     for msg in messages:
-        text_l = msg.text.lower()
-        hit = next((k for k in keywords if k in text_l), None)
+        hit = first_keyword(msg.text, keywords)
         if hit:
             events.append(
                 ChatSignalEvent(

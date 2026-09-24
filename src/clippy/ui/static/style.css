@@ -96,6 +96,9 @@ select, input[type="text"] {
   padding: 0.4rem 0.5rem;
 }
 .signals code { font-size: 0.8rem; color: var(--muted); }
+.reason { color: var(--muted); font-size: 0.85rem; margin: 0; }
+.panel details { margin-top: 0.75rem; }
+.panel summary { cursor: pointer; color: var(--muted); }
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);

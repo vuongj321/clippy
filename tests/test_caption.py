@@ -1,0 +1,388 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+
+from clippy.caption.chat_context import build_chat_context, is_emote_only, slice_chat
+from clippy.caption.generate import (
+    _strip_wrapping_quotes,
+    annotate_extracted_candidate,
+    generate_caption,
+)
+from clippy.chat.keywords import has_keyword
+from clippy.caption.reason import format_extract_reason
+from clippy.chat.models import ChatMessage
+from clippy.config import Settings
+from clippy.pipeline import (
+    _AnnotationJob,
+    _run_caption_pass,
+    _save_caption,
+    _select_annotation_jobs,
+)
+from clippy.store.db import Database
+
+
+def test_format_extract_reason_keyword():
+    text = format_extract_reason(
+        {"kind": "keyword", "keyword": "clip that", "user": "alice", "text": "CLIP THAT"}
+    )
+    assert "clip that" in text
+    assert "alice" in text
+
+
+def test_format_extract_reason_rate_and_audio():
+    text = format_extract_reason(
+        {
+            "kinds": ["rate_spike", "intensity_spike"],
+            "events": [
+                {"kind": "rate_spike", "multiplier": 3.2, "window_rate": 3.2, "baseline_rate": 1.0},
+                {"kind": "intensity_spike", "multiplier": 2.8},
+            ],
+        }
+    )
+    assert "3.2x" in text
+    assert "2.8x" in text
+
+
+def test_format_extract_reason_chat_audio_nested():
+    text = format_extract_reason(
+        {
+            "kind": "chat_audio",
+            "kinds": ["chat_audio"],
+            "events": [
+                {
+                    "kind": "chat_audio",
+                    "chat": {"kind": "keyword", "keyword": "clip it", "user": "bob"},
+                    "audio": {"kind": "intensity_spike", "multiplier": 2.5},
+                }
+            ],
+        }
+    )
+    assert "clip it" in text
+    assert "bob" in text
+    assert "2.5x" in text
+
+
+def test_format_extract_reason_empty():
+    assert format_extract_reason({}) == "Flagged by detection signals"
+
+
+def test_format_extract_reason_unknown_kinds_are_stable():
+    signals = {"kinds": ["zeta_alert", "alpha_ping"]}
+    assert format_extract_reason(signals) == "Flagged by alpha ping signal"
+
+
+def test_format_extract_reason_prefers_kind_field():
+    signals = {"kind": "custom_wave", "kinds": ["zeta_alert", "alpha_ping"]}
+    assert format_extract_reason(signals) == "Flagged by custom wave signal"
+
+
+def test_format_extract_reason_prefers_known_kind_in_set():
+    signals = {"kinds": ["zeta_alert", "chat_audio"]}
+    assert format_extract_reason(signals) == "Flagged by chat audio signal"
+
+
+def test_format_rate_spike_derives_multiplier_from_rates():
+    text = format_extract_reason(
+        {"kind": "rate_spike", "window_rate": 4.0, "baseline_rate": 2.0}
+    )
+    assert "2.0x" in text
+
+
+def test_format_rate_spike_treats_zero_window_as_present():
+    text = format_extract_reason(
+        {"kind": "rate_spike", "window_rate": 0.0, "baseline_rate": 1.0}
+    )
+    assert "0.0x" in text
+
+
+def test_format_rate_spike_zero_baseline_uses_fallback():
+    text = format_extract_reason(
+        {"kind": "rate_spike", "window_rate": 3.0, "baseline_rate": 0.0}
+    )
+    assert text == "Chat rate jumped vs the last minute"
+
+
+def test_format_audio_spike_bad_multiplier_uses_fallback():
+    text = format_extract_reason({"kind": "intensity_spike", "multiplier": "loud"})
+    assert text == "Audio got louder than the recent baseline"
+
+
+def test_slice_and_despam_chat():
+    messages = [
+        ChatMessage(ts=1.0, user="a", text="hello there"),
+        ChatMessage(ts=2.0, user="b", text="KEKW"),
+        ChatMessage(ts=3.0, user="c", text="clip that"),
+        ChatMessage(ts=4.0, user="d", text="KEKW"),
+        ChatMessage(ts=50.0, user="e", text="outside"),
+    ]
+    window = slice_chat(messages, start=0.0, end=10.0)
+    assert [m.user for m in window] == ["a", "b", "c", "d"]
+    assert is_emote_only("KEKW")
+    assert not is_emote_only("clip that")
+
+    ctx = build_chat_context(
+        messages,
+        start=0.0,
+        end=10.0,
+        keywords=["clip that"],
+        max_messages=10,
+    )
+    texts = [m["text"] for m in ctx["messages"]]
+    assert "hello there" in texts
+    assert "clip that" in texts
+    assert "KEKW" not in texts
+    assert ctx["keyword_hits"][0]["text"] == "clip that"
+    assert any(item["text"] == "kekw" and item["count"] == 2 for item in ctx["repeated"])
+
+
+def test_build_chat_context_caps_and_keeps_keywords():
+    messages = [
+        ChatMessage(ts=float(i), user="u", text=f"message {i}") for i in range(30)
+    ]
+    messages.append(ChatMessage(ts=30.0, user="x", text="please clip it"))
+    ctx = build_chat_context(
+        messages,
+        start=0.0,
+        end=30.0,
+        keywords=["clip it"],
+        max_messages=5,
+    )
+    assert len(ctx["messages"]) <= 5
+    assert any(m["text"] == "please clip it" for m in ctx["messages"])
+    message_keys = {(m["ts"], m["user"], m["text"]) for m in ctx["messages"]}
+    assert all(
+        (hit["ts"], hit["user"], hit["text"]) in message_keys
+        for hit in ctx["keyword_hits"]
+    )
+
+
+def test_build_chat_context_caps_keyword_pile_on():
+    messages = [
+        ChatMessage(ts=float(i), user="u", text="clip that") for i in range(20)
+    ]
+    messages.extend(
+        ChatMessage(ts=20.0 + i, user="u", text=f"normal {i}") for i in range(20)
+    )
+    ctx = build_chat_context(
+        messages,
+        start=0.0,
+        end=40.0,
+        keywords=["clip that"],
+        max_messages=5,
+    )
+    assert len(ctx["messages"]) == 5
+    assert all(m["text"] == "clip that" for m in ctx["messages"])
+    assert ctx["keyword_hits"] == ctx["messages"]
+
+
+def test_has_keyword_requires_word_boundary():
+    keywords = ["clip it", "clip that", "clip this", "clip"]
+    assert has_keyword("please clip it", keywords)
+    assert has_keyword("CLIP THAT", keywords)
+    assert has_keyword("clip", keywords)
+    assert not has_keyword("clippers", keywords)
+    assert not has_keyword("unclipped", keywords)
+    assert not has_keyword("eclipse", keywords)
+
+
+def test_strip_wrapping_quotes_keeps_apostrophe():
+    assert _strip_wrapping_quotes('"Jason reacts to GG EZ"') == "Jason reacts to GG EZ"
+    assert _strip_wrapping_quotes("'Jason reacts'") == "Jason reacts"
+    assert _strip_wrapping_quotes("Jason's") == "Jason's"
+    assert _strip_wrapping_quotes("  'wow'  ") == "wow"
+
+
+def test_generate_caption_parses_response(monkeypatch):
+    captured: dict = {}
+
+    class FakeResp:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": '"Jason reacts to GG EZ"'}}]}
+
+    def fake_post(*_a, **kwargs):
+        captured.update(kwargs)
+        return FakeResp()
+
+    monkeypatch.setattr("clippy.caption.generate.httpx.post", fake_post)
+    caption = generate_caption(
+        streamer_display_name="Jason",
+        streamer_login="jason",
+        transcript="I can't believe that",
+        chat_context={"messages": []},
+        api_key="test-key",
+    )
+    assert caption == "Jason reacts to GG EZ"
+    payload = json.loads(captured["json"]["messages"][1]["content"])
+    assert "extract_reason" not in payload
+    assert "extract_reason_do_not_repeat" not in payload
+
+
+def test_select_annotation_jobs_ranks_by_score_then_caps():
+    jobs = [
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.4),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.9),
+    ]
+    selected = _select_annotation_jobs(jobs, max_per_run=2)
+    assert [job.candidate_id for job in selected] == [2, 3]
+
+
+def test_select_annotation_jobs_zero_cap():
+    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9)]
+    assert _select_annotation_jobs(jobs, max_per_run=0) == []
+
+
+def test_run_caption_pass_skips_without_api_key(monkeypatch):
+    called: list[int] = []
+    monkeypatch.setattr(
+        "clippy.pipeline._save_caption",
+        lambda *a, **k: called.append(1),
+    )
+    jobs = [_AnnotationJob(1, Path("a.mp4"), 10.0, 0.9)]
+    count = _run_caption_pass(
+        object(),  # type: ignore[arg-type]
+        jobs,
+        chat=[],
+        settings=Settings(openai_api_key=""),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert count == 0
+    assert called == []
+
+
+def test_run_caption_pass_respects_cap(monkeypatch):
+    called: list[int] = []
+
+    def fake_save(db, candidate_id, **kwargs):
+        called.append(candidate_id)
+        return True
+
+    monkeypatch.setattr("clippy.pipeline._save_caption", fake_save)
+    jobs = [
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.2),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.5),
+    ]
+    count = _run_caption_pass(
+        object(),  # type: ignore[arg-type]
+        jobs,
+        chat=[],
+        settings=Settings(openai_api_key="sk-test", caption_max_per_run=2),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert count == 2
+    assert called == [2, 3]
+
+
+def test_run_caption_pass_counts_only_saved_captions(monkeypatch):
+    def fake_save(db, candidate_id, **kwargs):
+        return candidate_id == 2
+
+    monkeypatch.setattr("clippy.pipeline._save_caption", fake_save)
+    jobs = [
+        _AnnotationJob(1, Path("a.mp4"), 10.0, 0.2),
+        _AnnotationJob(2, Path("b.mp4"), 20.0, 0.9),
+        _AnnotationJob(3, Path("c.mp4"), 30.0, 0.5),
+    ]
+    count = _run_caption_pass(
+        object(),  # type: ignore[arg-type]
+        jobs,
+        chat=[],
+        settings=Settings(openai_api_key="sk-test", caption_max_per_run=3),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert count == 1
+
+
+def test_save_caption_returns_false_without_caption(monkeypatch):
+    written: list[tuple[int, dict]] = []
+
+    class FakeDb:
+        def update_candidate_caption(self, candidate_id, **kwargs):
+            written.append((candidate_id, kwargs))
+
+    monkeypatch.setattr(
+        "clippy.pipeline.annotate_extracted_candidate",
+        lambda **k: (None, "heard something"),
+    )
+    ok = _save_caption(
+        FakeDb(),  # type: ignore[arg-type]
+        7,
+        media_path=Path("a.mp4"),
+        chat=[],
+        source_ts=1.0,
+        settings=Settings(openai_api_key="sk-test"),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert ok is False
+    assert written == [(7, {"caption": None, "transcript": "heard something"})]
+
+
+def test_save_caption_returns_false_on_exception(monkeypatch):
+    def boom(**kwargs):
+        raise RuntimeError("401")
+
+    monkeypatch.setattr("clippy.pipeline.annotate_extracted_candidate", boom)
+    ok = _save_caption(
+        object(),  # type: ignore[arg-type]
+        7,
+        media_path=Path("a.mp4"),
+        chat=[],
+        source_ts=1.0,
+        settings=Settings(openai_api_key="sk-test"),
+        streamer_display_name="Jason",
+        streamer_login="jason",
+    )
+    assert ok is False
+
+
+def test_annotate_skips_without_api_key():
+    caption, transcript = annotate_extracted_candidate(
+        media_path=None,
+        chat=[],
+        source_ts=10.0,
+        pre_context_seconds=5.0,
+        post_context_seconds=5.0,
+        streamer_display_name="Jason",
+        streamer_login="jason",
+        settings=Settings(openai_api_key=""),
+    )
+    assert caption is None
+    assert transcript is None
+
+
+def test_migrates_legacy_candidates_table(tmp_path: Path):
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stream_id INTEGER NOT NULL,
+            source_ts REAL NOT NULL,
+            pre_context_seconds REAL NOT NULL,
+            post_context_seconds REAL NOT NULL,
+            signals TEXT NOT NULL DEFAULT '{}',
+            score REAL NOT NULL DEFAULT 0,
+            media_path TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    with db.connection() as migrated:
+        cols = {row[1] for row in migrated.execute("PRAGMA table_info(candidates)")}
+    assert {"extract_reason", "caption", "transcript"}.issubset(cols)
