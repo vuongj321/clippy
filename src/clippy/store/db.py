@@ -71,10 +71,11 @@ CREATE INDEX IF NOT EXISTS idx_candidates_status
     ON candidates(status);
 """
 
+# SQLite cannot bind identifiers. These DDL strings are module constants only.
 CANDIDATE_COLUMN_MIGRATIONS = (
-    ("extract_reason", "TEXT"),
-    ("caption", "TEXT"),
-    ("transcript", "TEXT"),
+    ("extract_reason", "ALTER TABLE candidates ADD COLUMN extract_reason TEXT"),
+    ("caption", "ALTER TABLE candidates ADD COLUMN caption TEXT"),
+    ("transcript", "ALTER TABLE candidates ADD COLUMN transcript TEXT"),
 )
 
 
@@ -171,9 +172,9 @@ class Database:
         existing = {
             row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
         }
-        for name, col_type in CANDIDATE_COLUMN_MIGRATIONS:
+        for name, ddl in CANDIDATE_COLUMN_MIGRATIONS:
             if name not in existing:
-                conn.execute(f"ALTER TABLE candidates ADD COLUMN {name} {col_type}")
+                conn.execute(ddl)
 
     def get_or_create_streamer(self, login: str, display_name: str | None = None) -> Streamer:
         login = login.lower().strip()

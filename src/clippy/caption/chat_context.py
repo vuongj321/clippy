@@ -69,28 +69,28 @@ def build_chat_context(
     window = slice_chat(messages, start=start, end=end)
     counts: Counter[str] = Counter()
     keyword_hits: list[dict[str, Any]] = []
-    kept: list[ChatMessage] = []
+    keyword_kept: list[ChatMessage] = []
+    other_kept: list[ChatMessage] = []
 
     for msg in window:
         text = msg.text.strip()
         if not text:
             continue
         counts[text.lower()] += 1
-        hit = _has_keyword(text, keywords)
-        if hit:
+        if _has_keyword(text, keywords):
             keyword_hits.append({"ts": msg.ts, "user": msg.user, "text": msg.text})
-        if hit or not is_emote_only(text):
-            kept.append(msg)
+            keyword_kept.append(msg)
+        elif not is_emote_only(text):
+            other_kept.append(msg)
 
-    if len(kept) > max_messages:
-        keyword_ids = {id(m) for m in kept if _has_keyword(m.text, keywords)}
-        prioritized = [m for m in kept if id(m) in keyword_ids]
-        rest = [m for m in kept if id(m) not in keyword_ids]
+    if len(keyword_kept) + len(other_kept) > max_messages:
         mid = (start + end) / 2.0
-        rest.sort(key=lambda m: abs(m.ts - mid))
-        needed = max(0, max_messages - len(prioritized))
-        kept = prioritized + rest[:needed]
-        kept.sort(key=lambda m: m.ts)
+        other_kept.sort(key=lambda m: abs(m.ts - mid))
+        needed = max(0, max_messages - len(keyword_kept))
+        kept = keyword_kept + other_kept[:needed]
+    else:
+        kept = keyword_kept + other_kept
+    kept.sort(key=lambda m: m.ts)
 
     repeated = [
         {"text": text, "count": count}
