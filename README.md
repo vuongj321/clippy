@@ -27,9 +27,9 @@ uv run clippy-serve
 
 Open http://127.0.0.1:8000 to review candidates.
 
-Chat JSON may be a list of `{ "ts", "user", "text" }` objects, or `{ "messages": [...] }` / `{ "comments": [...] }`.
+Chat JSON may be a list of `{ "ts", "user", "text" }` objects, or `{ "messages": [...] }` / `{ "comments": [...] }`. Keyword hits use whole-phrase / word-boundary matching (`clip` does not match `clippers`).
 
-Set `CLIPPY_OPENAI_API_KEY` in `.env` to generate a short UI caption and transcript on **new** runs. After extracts finish, only the top `caption_max_per_run` extracted clips (default 20, highest score first) get speech-to-text plus a caption. Disk-skipped rows and lower-ranked extracts keep `extract_reason` only. There is no later pass and rerunning does not backfill. Captions are shown in the review UI only — they are not burned into the MP4.
+Set `CLIPPY_OPENAI_API_KEY` in `.env` to generate a short UI caption and transcript on **new** runs. After extracts finish, only the top `caption_max_per_run` extracted clips (default 20, highest score first) get speech-to-text plus a caption. Disk-skipped rows and lower-ranked extracts keep `extract_reason` only. There is no later pass and rerunning does not backfill. Captions are shown in the review UI only — they are not burned into the MP4. The run summary JSON includes `annotated`.
 
 ## Live pipeline
 
@@ -39,7 +39,7 @@ uv run clippy-live --channel somechannel --duration 300
 uv run clippy-serve
 ```
 
-Records via Streamlink, collects IRC chat on the same wall-clock timeline, then runs detect/extract.
+Records via Streamlink, collects IRC chat on the same wall-clock timeline, then runs the same detect/extract/annotate path.
 
 ## Export / eval
 
@@ -61,4 +61,4 @@ docs/           architecture notes
 
 ## Config
 
-See `config.example.yaml`. Important knobs: `pre_context_seconds`, `post_context_seconds`, `coalesce_gap_seconds`, chat spike multiplier, audio spike multiplier, `disk_budget_gb`, `asr_model`, `caption_model`, `caption_max_per_run`.
+See `config.example.yaml`. Important knobs: `pre_context_seconds`, `post_context_seconds`, `coalesce_gap_seconds`, chat spike multiplier, audio spike multiplier, `disk_budget_gb`, `asr_model`, `caption_model`, `caption_max_per_run`, `caption_max_chat_messages`, `openai_base_url`.
