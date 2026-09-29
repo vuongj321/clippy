@@ -33,15 +33,18 @@ def extract_mono_pcm(
     *,
     sample_rate: int = 16000,
     ffmpeg_path: str = "ffmpeg",
+    start_seconds: float | None = None,
+    duration_seconds: float | None = None,
 ) -> np.ndarray:
-    """Decode audio to mono float32 PCM via ffmpeg."""
+    """Decode audio to mono float32 PCM via ffmpeg, optionally a bounded window."""
     ffmpeg = _require_ffmpeg(ffmpeg_path)
-    cmd = [
-        ffmpeg,
-        "-v",
-        "error",
-        "-i",
-        str(media_path),
+    cmd = [ffmpeg, "-v", "error"]
+    if start_seconds:
+        cmd += ["-ss", f"{max(0.0, float(start_seconds)):.3f}"]
+    cmd += ["-i", str(media_path)]
+    if duration_seconds:
+        cmd += ["-t", f"{max(0.1, float(duration_seconds)):.3f}"]
+    cmd += [
         "-ac",
         "1",
         "-ar",

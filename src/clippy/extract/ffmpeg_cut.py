@@ -30,6 +30,8 @@ def extract_window(
     start_seconds: float,
     duration_seconds: float,
     ffmpeg_path: str = "ffmpeg",
+    crf: int = 23,
+    preset: str = "veryfast",
 ) -> Path:
     ffmpeg = shutil.which(ffmpeg_path) or (
         ffmpeg_path if Path(ffmpeg_path).exists() else None
@@ -56,9 +58,9 @@ def extract_window(
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        preset,
         "-crf",
-        "23",
+        str(crf),
         "-c:a",
         "aac",
         "-movflags",
