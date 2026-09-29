@@ -35,6 +35,8 @@ clippy-vod = "clippy.cli:run_vod_main"
 clippy-live = "clippy.cli:run_live_main"
 clippy-serve = "clippy.cli:serve_main"
 clippy-export = "clippy.cli:export_main"
+clippy-edit = "clippy.cli:edit_main"
+clippy-capture = "clippy.cli:capture_main"
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
