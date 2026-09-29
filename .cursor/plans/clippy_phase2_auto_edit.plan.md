@@ -4,19 +4,19 @@ overview: "Turn Phase 1 candidate events into publishable vertical short-form cl
 todos:
   - id: m0-edit-skeleton
     content: EditPlan schema, data/edits + data/source artifact dirs, renders table + edit_status + stream source columns, new Settings fields, clippy-edit --dry-run
-    status: pending
+    status: completed
   - id: m1-hq-capture
     content: "HQ VOD capture (streamlink/yt-dlp), timeline-offset verification, chat reuse, --source re-cut path, source retention/prune, install docs, low-res source badge"
-    status: pending
+    status: completed
   - id: m2-boundaries
     content: Context analysis + start/end determination with hard non-cutting constraints and optional clamped LLM refinement
-    status: pending
+    status: completed
   - id: m3-extract
     content: Cut base.mp4 from the HQ source at final boundaries with duration assertion
-    status: pending
+    status: completed
   - id: m4-deadair
     content: Dead-air removal (silencedetect intersected with word gaps), protected main region, segment map in plan.json
-    status: pending
+    status: completed
   - id: m5-captions
     content: Word-level ASR timings, cue alignment, ASS writer with emphasis and configurable style presets
     status: pending
@@ -253,6 +253,10 @@ clippy-capture --vod <vod-url-or-id> --quality best -o data/source/{channel}_{vo
   slightly and lose label continuity, so it is not the default).
 - The existing stream row (284x160, quality `160p`) is badged **low-res source (smoke fixture)**
   in the UI; integration tests use it as a local, network-free fixture.
+- Deferred alternative for future runs: a `--start/--duration` capture option backed by yt-dlp's
+  `--download-sections`, for grabbing a single moment instead of a whole 6 h VOD. It would record
+  the section start as `source_offset_seconds` automatically. Not needed while the full VOD is
+  available, so it stays out of M1's scope.
 
 ## Stage 1-2: Context analysis and boundary determination (`edit/boundaries.py`)
 
@@ -551,6 +555,99 @@ uv run clippy-export          # includes render columns
 
 ## Status
 
-**No implementation has been started.** This file is the plan of record; M0 through M11 are
-`pending` and will not begin until explicitly approved.
+**M0-M11 are complete. Full suite: 239 passing.** M5-M11 all ran against the real VOD (candidate 5) as well as the fixture.
+
+## M5-M11 delivered
+
+- **M5 captions** - `caption/asr.py::transcribe_words` (`verbose_json` + word/segment granularity, segment-only retry, segment interpolation fallback, top-level `words` folding), `caption/align.py` (`Cue`, `build_cues` with character/duration/gap/sentence breaks, `_normalise` merge+stretch+clamp, `pick_emphasis_words`), `caption/styles.py` (`karaoke_highlight`/`block_pop`/`minimal` presets + `Settings` overrides + `caption_anchor`), `caption/ass.py` (escaping, `H:MM:SS.cc` timestamps, `\k` karaoke and recoloured-plain modes, `write_ass`), `edit/captions.py::generate_captions` (cached transcript, style/emphasis resolution, degrade paths), pipeline stage `captioned`, `renders.captions_path`.
+- **M6 layouts + tracking** - `edit/track.py` (`centroid_from_energy` with centre prior, `smooth_track`, `resample_track`, ffmpeg motion-profile decode, `track_subject`), `edit/layouts.py` (`LayoutLayer`/`LayoutSegment`/`CompositionPlan`, `crop_rect`, `resolve_strategy` with low-res downgrade, `segments_from_track` deadband+capped spans, `_fit_layers`/`_irl_layers`/`_gaming_layers`/`_conversation_layers`, `plan_layout`, upscale-factor warnings).
+- **M7 composition** - `edit/render.py::build_composition_filter` (per-segment canvas + layers + overlay + concat + `ass` burn, audio trimmed in step) and `compose_vertical` (track -> layout -> `layout.json` -> single-pass `vertical.mp4`, plan summary + warnings, length check).
+- **M8 audio** - `edit/audio.py::parse_loudnorm_output`, `build_loudnorm_filter` (measured two-pass with `linear=true`, `alimiter` guard), `measure_loudness`, `normalize_audio` (`-c:v copy`, single-pass fallback, never unnormalized).
+- **M9 metadata** - `edit/metadata.py::ClipMetadata`, `normalize_hashtag`, `build_hashtags`, `validate_metadata` (drops hashtags the transcript/chat cannot support, caps title/hashtag counts), `fallback_metadata`, `generate_metadata` (LLM + validation + fallback with reasons), `capture_thumbnail` (frame grab, optional `drawtext` overlay), `metadata.json`.
+- **M10 review** - `api/app.py`: candidate page now renders the finished clip, boundaries, dead air, layout and caption cues, plus `POST /candidates/{id}/render` (overrides + force), `POST /candidates/{id}/metadata`, `GET /renders/{id}/media`, `GET /candidates/{id}/download`; `ui/` templates gained the render badge, re-render form and metadata editor.
+- **M11 docs** - `docs/architecture.md` sections 17-20 (stage table, decisions, deliberate gaps, testing), `README.md` Phase 2 workflow/artifacts/config, `config.example.yaml` completed.
+
+### Verified against the real VOD
+
+- M5: Groq returned 200 for word granularity; **13 cues** written to `data/edits/5/captions.ass`, plan stage `captioned`.
+- M6-M9: the pipeline test renders the fixture end-to-end (`final.mp4` at 1080x1920 with burned captions, loudness-normalized, `metadata.json` + `thumbnail.jpg`).
+
+### Bugs found by real data (and fixed)
+
+1. **Groq accepts `timestamp_granularities` but returns no word timings** (0 words, 9 segments). The interpolation fallback kept every cue in sync; `_attach_top_level_words` now also folds timings returned beside `segments` instead of discarding them.
+2. **`clip that` split into tokens** emphasised every "that" in the clip; multi-word chat keywords no longer leak their parts.
+3. **Windows drive colon in `fontsdir` broke the whole filter graph** ("No option name near '/Windows/Fonts'"). Verified empirically against ffmpeg 9.0.2 - a *double* backslash is required - and `escape_filter_path` now does that.
+4. **`normalize_hashtag` deleted the characters it meant to keep** (a `re.sub` with a keep-pattern), which silently produced empty tags; caught by the metadata tests.
+
+
+## M4 delivered
+
+- `src/clippy/edit/deadair.py` - span math (`merge_spans`, `complement_spans`, `subtract_span`, `shrink_spans`), `parse_silences`/`detect_silences` (ffmpeg `silencedetect`, dangling trailing silence closed at the clip duration), `plan_deadair` (speech veto, payoff protection, guard band, minimum gap/keep, total-removal cap, `cut`/`speed` modes), `build_deadair_filter` (single-pass `trim`/`atrim` + `concat`), `segments_for_render`.
+- `edit/render.py` - `apply_deadair` writes `trimmed.mp4`, records the segment map/`removed_seconds`/reason on the plan, keeps the filter graph to streams that exist, and reports a length mismatch instead of hiding it.
+- `edit/pipeline.py` - the render path runs extract -> dead air, marks the plan stage `trimmed`, records a `rough` render row for `trimmed.mp4`, and reports `deadair_removed_seconds`.
+- `extract/ffmpeg_cut.extract_window` - optional `crf`/`preset`; intermediates now use `intermediate_crf` (16) so the final encode is not a second lossy generation.
+- Tests: 14 pure tests in `tests/test_edit_deadair.py` plus 3 real-media tests (cut, speed mode, nothing-cuttable copy). Full suite: 160 passing.
+
+Two real bugs caught by the tests: `merge_spans` admitted a zero-length span after clipping negatives, and the removal cap's tie-break depended on float ordering (now deterministic, restoring the earlier gap so opening context survives).
+
+## M1 delivered and verified against the real VOD
+
+- Capture: `data/source/2876956941.ts` - **19.18 GB, 1920x1080 @60, 22211.77 s** (matches the VOD length exactly), 1080p60 for a 6.2 h stream, ~8.1 MB/s, ~39 min.
+- Stream 1 recorded with `capture_quality=best`, real dimensions/fps/bytes and `source_offset_seconds=0.0`, so `clippy-edit` needs no `--source` flag.
+- Chat dump parsed: 127,553 messages, ts 0 -> 22210, 31 active 1-minute bins in the first 30 min (well above `MIN_ACTIVE_BINS`).
+
+### Bug found on real data (and fixed)
+
+The chat-vs-audio estimator reported `+30.0s` (score 0.14) and `clippy-capture` **applied** it, writing a wrong offset onto the stream row - which would have shifted every clip by 30 seconds. Verification against ground truth (correlating Phase 1's 60 s clips, cut from the original source, against the same nominal range of the HQ capture) showed the true offset is **0 s** at scores of 0.94-0.99 across five candidates.
+
+Fixes:
+
+1. `capture_main` no longer applies a chat-derived offset; that check may only warn. Only `--source-offset` or a confident `verify_offset_with_clips` result is applied.
+2. New `verify_offset_with_clips` in `ingest/align.py` - RMS-envelope correlation of identical audio content (median of confident clips), with `OffsetVerification.is_confident()`. It is decisive in a way chat-vs-audio correlation never can be, because chat bursts and loud moments are both spiky.
+3. The recorded `source_offset_seconds` was corrected back to 0 for stream 1.
+4. Tests cover both directions: recovering a 0 s offset and **detecting an injected 30 s shift** on real audio.
+
+## M3 delivered
+
+- `src/clippy/edit/render.py` - `extract_base`: cached, duration-verified cut at the planned bounds, clamps the plan to the media that actually exists and records an `extract_short` warning.
+- `edit/pipeline.py` - `dry_run=False` now cuts `base.mp4`, marks the plan stage `extracted`, and records an extraction failure on the render row instead of aborting the batch; the summary gained `extracted`.
+- `tests/test_edit_render.py` + pipeline tests - 6 new tests (real ffmpeg cuts against the local fixture, early-source clamping, caching, zero-length and missing-source guards).
+
+## M2 delivered
+
+- `src/clippy/edit/boundaries.py` - `Word`/`Utterance`/`ContextEvidence`/`BoundaryEvidence`/`BoundaryDecision`, `words_to_utterances`, `speech_gaps`, `adjust_start`/`adjust_end` (never mid-word), `chat_burst_end_ts`, `audio_decay_ts`, `enforce_constraints`, `detect_bounds`, `apply_llm_bounds` + `refine_bounds_with_llm` (injected, clamped), `evidence_from_chat`.
+- `edit/plan.py` - plans carry `boundary_evidence` (evidence + every adjustment); `build_plan` accepts evidence-driven bounds and only flags `boundaries_pending` when they are missing or fell back.
+- `edit/pipeline.py` - `run_edit_pipeline(..., chat_path=...)` builds chat evidence per candidate; summary gains `chat_evidence` and `evidence_bounds`.
+- `cli.py` - `clippy-edit --chat <json>`.
+- `tests/test_edit_boundaries.py` - 33 tests.
+
+Verified: candidate 5 planned from the real 127,553-message chat dump now yields `start 360.0 / end 390.0 / 30.0s` with `method: signal_evidence` and `chat_burst_end_ts: 390.0`, where before it was a 45 s Phase 1 window. Full suite: 129 passing.
+
+Three real bugs the tests caught and fixed: the reaction-tail cap could truncate a sentence still being spoken; the "hook" rule picked the main utterance instead of the setup line; the duration ceiling could pull the start past the main event (now floored at `main - min_context`).
+
+## M0 delivered
+
+- `src/clippy/edit/plan.py` - `EditPlan`/`ClipBounds`/`DeadAirPlan`/`LayoutPlan`/`CaptionsPlan`/`AudioPlan`/`MetadataPlan`, `EditOverrides`, `EditPaths`, `phase1_bounds`, `build_plan`.
+- `src/clippy/edit/pipeline.py` - `run_edit_pipeline(..., dry_run=True)` (plan + `renders` row, no ffmpeg/network), `resolve_jobs`, `select_edit_jobs`.
+- `store/db.py` - `renders` table, `candidates.edit_status`/`edited_media_path`, `streams.source_*`, generalized `TABLE_MIGRATIONS`, `Render` dataclass, `bad_edit`/`bad_captions` rejection reasons.
+- `cli.py` + `pyproject.toml` + `scripts/run_edit.py` - the `clippy-edit` entry point.
+- `tests/test_edit_plan.py`, `tests/test_edit_store.py`, `tests/test_edit_pipeline.py` - 36 new tests.
+- `config.example.yaml` + `.gitignore` updates.
+
+M1 delivered (code complete, real capture pending):
+
+- `src/clippy/ingest/capture.py` - `vod_url`, `normalize_downloader`, `build_capture_argv` (streamlink + yt-dlp), `capture_vod`, `probe_video_metadata`, `prune_sources`, `default_output_path`.
+- `src/clippy/ingest/align.py` - `estimate_timeline_offset` (numpy cross-correlation of chat activity vs audio RMS), `alignment_warning`, `probe_alignment` with a bounded decode window and a `MIN_ACTIVE_BINS` evidence guard.
+- `audio/intensity.extract_mono_pcm` - optional `start_seconds`/`duration_seconds` so alignment decodes a window instead of a whole 6 h VOD.
+- `store/db.update_stream_source` - records the capture path, real dimensions/fps/size and offset on the stream row.
+- `cli.py` + `pyproject.toml` + `scripts/capture.py` - the `clippy-capture` entry point.
+- `tests/test_ingest_capture_align.py` + a store test - 20 new tests.
+
+Verified: full suite at 94 passing; `streamlink 8.6.1` installed via `uv tool install streamlink`; every flag in the generated argv confirmed against streamlink's own option parser; an invalid VOD now fails in ~8 s with `clippy-capture: ... failed with exit code 1` instead of hanging ~50 s; `clippy-capture --help` and `probe_video_metadata` against the local fixture work.
+
+**Environment finding:** the Phase 1 source VOD `...TN-160p.ts` has been deleted from `C:\Users\Jason\Downloads`, so no existing candidate has playable source footage. The real M1 gate (capture a VOD, then `clippy-edit --candidate 5 --source <hq>`) needs a VOD URL/id from the user.
+
+Remaining: M1's real capture, then M2-M11 in order.
+
+
 

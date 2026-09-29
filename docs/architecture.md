@@ -644,3 +644,90 @@ Three decisions shape the architecture:
 
 That is what makes the Phase 1 question — *can we consistently find moments a human would
 clip?* — answerable with one number.
+
+---
+
+# Phase 2 — automated vertical editing
+
+Phase 1 answers *which moments*. Phase 2 answers *can those moments be published without a
+human opening an editor* — and what exactly a reviewer still has to check.
+
+## 17. Stage pipeline
+
+```text
+HQ capture → boundaries → extract base → dead air → captions → vertical → audio → metadata → review
+```
+
+Every stage owns an artifact under `data/edits/<candidate_id>/` and a `stage` in `plan.json`,
+so a run can stop, be inspected, and resumed:
+
+| stage | artifact | meaning |
+| --- | --- | --- |
+| `planned` | `plan.json` | bounds chosen, nothing rendered |
+| `extracted` | `base.mp4` | exact source window, cached |
+| `trimmed` | `trimmed.mp4` | dead air removed |
+| `captioned` | `captions.ass`, `transcript.json` | word timings and cues |
+| `composed` | `layout.json`, `vertical.mp4` | 1080x1920, captions burned in |
+| `complete` | `final.mp4`, `metadata.json`, `thumbnail.jpg` | loudness-normalized and publishable |
+
+Two rules keep the stages composable:
+
+1. **Times on the trimmed timeline.** Captions are transcribed from `trimmed.mp4`, so no cue
+   ever needs remapping after a cut.
+2. **Every stage caches.** Re-running reuses artifacts and re-renders only what changed;
+   `--force` discards everything for that candidate.
+
+## 18. Decisions and why
+
+**Capture `best`, then let clips decide alignment.** Streamlink was originally invoked at
+`worst` quality, which made every downstream stage fight a 284x160 source. Capture now asks for
+`best` and records the real dimensions. Chat-vs-audio alignment produced a confident-looking
+`+30 s` offset (score 0.14) on the first real VOD; ground truth from clip correlation showed the
+offset was `0` (scores 0.94-0.99). Chat alignment now only *warns*, and
+`verify_offset_with_clips` is the sole authoritative applier.
+
+**Dead air without a speech model.** `silencedetect` plus a guard band, a minimum gap size, a
+removal cap, and payoff protection — but no word veto, because words only exist after the cut
+(see 19). Cuts are *removals first, speed-ups second*: speeding up a reaction to save 0.4 s
+reads as a glitch, so speed is used only when a gap is long and the cap is already reached.
+
+**Captions degrade, never fail.** ASR is asked for `verbose_json` with word timings; a server
+that rejects word granularity is retried segment-only, and word times are then interpolated
+across each segment so karaoke still tracks roughly. Groq accepts the parameter but returns
+`words` beside `segments`; that shape is folded back in rather than silently re-interpolated.
+No API key, an ASR error, or an empty transcript leaves the plan explaining why and the render
+continues without burned-in text.
+
+**One video encode.** `compose_vertical` does crop/scale/overlay/concat/caption-burn in a single
+pass; `normalize_audio` then copies the video stream and re-encodes only audio. Intermediates
+are cut at `crf 16` so the final picture is not a second-generation encode of a lossy one.
+
+**Layouts are segments, not expressions.** A tracked crop becomes spans with a static rectangle
+each, concatenated in the same pass. A crop therefore only moves when the subject genuinely
+moves (deadband), which looks calmer than a continuously drifting expression, and `layout.json`
+stays readable by a human.
+
+**Metadata is validated or replaced.** A model proposal is accepted only where the transcript,
+chat or streamer identity supports it — an invented hashtag is dropped, an empty title is
+rejected, and any failure falls back to deterministic text with a recorded reason.
+
+## 19. Deliberate gaps
+
+| gap | why it is acceptable now | what a real fix needs |
+| --- | --- | --- |
+| No speech veto in dead air | the guard band, minimum gap and payoff protection already keep cuts off the main moment | one ASR pass on `base.mp4` plus a time remap through the keep segments |
+| `conversation` splits the frame in half | a wrongly-guessed speaker is worse than a static split | per-region motion or diarization |
+| Vertical position is not tracked | without face detection it chases noise | a face/person detector |
+| Interpolated word timings when a server has none | cues stay in sync at segment granularity; only karaoke precision suffers | a server that returns word timings |
+| Review re-render is synchronous | one clip takes seconds, and a reviewer expects to wait | a job queue |
+
+## 20. Testing
+
+The suite is fast and mostly pure: boundary, dead-air, layout, cue and metadata maths are tested
+as functions, ffmpeg is exercised through the synthetic `samples/sample_vod.mp4` fixture, and the
+API is driven with `TestClient`. Two behaviours are covered end-to-end because they are the ones
+that broke in practice: the pipeline integration test renders a real 1080x1920 clip with burned
+captions and normalized audio, and the ffmpeg filter strings are asserted against the actual
+escaping rules (a Windows drive colon in `fontsdir` needs a *double* backslash — verified against
+ffmpeg 9.0.2, not assumed).
+
