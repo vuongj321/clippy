@@ -23,6 +23,80 @@
   <p class="muted">No media extracted for this candidate.</p>
 {% endif %}
 
+{% if render and render.path %}
+  <section class="panel">
+    <h2>
+      Edited clip
+      {% if plan %}<span class="muted">({{ plan.layout.width }}×{{ plan.layout.height }})</span>{% endif %}
+    </h2>
+    <video class="detail-video" controls src="/renders/{{ render.id }}/media"></video>
+    <p class="sub">
+      revision {{ render.revision }}
+      {%- if plan %} ·
+        {{ plan.layout.resolved_strategy }} ·
+        {{ '%.2f'|format(plan.layout.upscale_factor) }}x upscale ·
+        {{ '%.1f'|format(plan.deadair.removed_seconds) }}s dead air removed ·
+        stage {{ plan.stage }}
+      {%- endif %}
+    </p>
+    {% if plan and plan.warnings %}
+      <ul class="reasons">
+        {% for warning in plan.warnings %}
+          <li><code>{{ warning.code }}</code> — {{ warning.message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    {% if plan %}
+      <details>
+        <summary>Clip boundaries</summary>
+        <pre>{{ plan.bounds.to_dict() | tojson(indent=2) }}</pre>
+      </details>
+      <details>
+        <summary>Dead air</summary>
+        <pre>{{ plan.deadair.to_dict() | tojson(indent=2) }}</pre>
+      </details>
+      <details>
+        <summary>Layout</summary>
+        <pre>{{ plan.layout.to_dict() | tojson(indent=2) }}</pre>
+      </details>
+    {% endif %}
+    <p><a href="/candidates/{{ view.candidate.id }}/download">Download final.mp4</a></p>
+    <form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/render">
+      <select name="strategy">
+        <option value="">Layout (keep current)</option>
+        {% for option in strategies %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+      </select>
+      <select name="caption_style">
+        <option value="">Captions (keep current)</option>
+        {% for option in caption_styles %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+      </select>
+      <select name="caption_emphasis">
+        <option value="">Emphasis (keep current)</option>
+        {% for option in caption_emphasis_modes %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+      </select>
+      <label><input type="checkbox" name="force" value="1" /> redo cached steps</label>
+      <button type="submit">Re-render</button>
+    </form>
+  </section>
+{% elif plan %}
+  <section class="panel">
+    <h2>Edited clip</h2>
+    <p class="muted">Planned (stage: {{ plan.stage }}) but nothing rendered yet.</p>
+    <form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/render">
+      <button type="submit">Render now</button>
+    </form>
+  </section>
+{% endif %}
+
+{% if caption_preview %}
+  <section class="panel">
+    <h2>Captions</h2>
+    <ul>
+      {% for cue in caption_preview %}<li>{{ cue }}</li>{% endfor %}
+    </ul>
+  </section>
+{% endif %}
+
 <section class="panel">
   <h2>Why it was extracted</h2>
   {% if view.candidate.extract_reason %}
@@ -44,6 +118,25 @@
     <p class="muted">No transcript for this candidate.</p>
   {% endif %}
 </section>
+
+{% if plan and plan.metadata.title %}
+  <section class="panel">
+    <h2>Metadata</h2>
+    <p><strong>{{ plan.metadata.title }}</strong></p>
+    {% if plan.metadata.description %}<p>{{ plan.metadata.description }}</p>{% endif %}
+    {% if plan.metadata.hashtags %}
+      <p class="muted">
+        {%- for tag in plan.metadata.hashtags %}#{{ tag }}{% if not loop.last %} {% endif %}{% endfor -%}
+      </p>
+    {% endif %}
+    <form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/metadata">
+      <label>Title<input type="text" name="title" value="{{ plan.metadata.title or '' }}" /></label>
+      <label>Description<input type="text" name="description" value="{{ plan.metadata.description or '' }}" /></label>
+      <label>Hashtags<input type="text" name="hashtags" value="{{ plan.metadata.hashtags|join(', ') }}" /></label>
+      <button type="submit">Save metadata</button>
+    </form>
+  </section>
+{% endif %}
 
 {% if view.candidate.status == 'pending' %}
 <form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/review">

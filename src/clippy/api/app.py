@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -8,10 +9,46 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from clippy.config import Settings, get_settings
+from clippy.edit.pipeline import run_edit_pipeline
+from clippy.edit.plan import (
+    CAPTION_EMPHASIS_MODES,
+    CAPTION_STYLES,
+    STRATEGIES,
+    EditOverrides,
+    EditPaths,
+    EditPlan,
+    MetadataPlan,
+)
 from clippy.store.db import REJECTION_REASONS, Database
 
 UI_DIR = Path(__file__).resolve().parents[1] / "ui"
 TEMPLATES = Jinja2Templates(directory=str(UI_DIR / "templates"))
+
+
+def _normalize_tag(raw: str) -> str:
+    """Human-typed hashtags are forgiving: strip decoration, collapse spaces."""
+    token = raw.strip().lstrip("#").lower().replace(" ", "").replace("-", "")
+    return "".join(ch if (ch.isalnum() or ch == "_") else "" for ch in token)
+
+
+def _caption_preview(ass_path: Path, *, limit: int = 6) -> list[str]:
+    """Readable cue text out of the ASS track, for the review page."""
+    import re
+
+    if not ass_path.exists():
+        return []
+    preview: list[str] = []
+    tag_re = re.compile(r"\{[^}]*\}")
+    for line in ass_path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("Dialogue:"):
+            continue
+        text = line.split(",", 9)[-1]
+        cleaned = tag_re.sub("", text).replace("\\N", " ").strip()
+        if cleaned:
+            preview.append(cleaned)
+        if len(preview) >= limit:
+            break
+    return preview
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -52,6 +89,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not view:
             raise HTTPException(status_code=404, detail="Candidate not found")
         stats = db.stats()
+
+        paths = EditPaths.for_candidate(settings, candidate_id)
+        plan = None
+        if paths.plan.exists():
+            try:
+                plan = EditPlan.load(paths.plan)
+            except Exception:  # a corrupt plan must not break the review page
+                plan = None
         return TEMPLATES.TemplateResponse(
             request,
             "candidate.html",
@@ -59,6 +104,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "view": view,
                 "stats": stats,
                 "reasons": REJECTION_REASONS,
+                "render": db.get_current_render(candidate_id),
+                "plan": plan,
+                "caption_preview": _caption_preview(paths.captions),
+                "strategies": STRATEGIES,
+                "caption_styles": CAPTION_STYLES,
+                "caption_emphasis_modes": CAPTION_EMPHASIS_MODES,
             },
         )
 
@@ -95,5 +146,89 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/stats")
     def api_stats() -> dict:
         return db.stats()
+
+    @app.post("/candidates/{candidate_id}/render")
+    def render_candidate(
+        candidate_id: int,
+        strategy: str = Form(""),
+        caption_style: str = Form(""),
+        caption_emphasis: str = Form(""),
+        force: str = Form(""),
+    ) -> RedirectResponse:
+        """Re-render one candidate, optionally with overrides (the human escape hatch)."""
+        if db.get_candidate(candidate_id) is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        overrides = EditOverrides(
+            strategy=strategy or None,
+            caption_style=caption_style or None,
+            caption_emphasis=caption_emphasis or None,
+        )
+        try:
+            run_edit_pipeline(
+                settings=settings,
+                candidate_ids=[candidate_id],
+                dry_run=False,
+                force=bool(force),
+                overrides=overrides,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url=f"/candidates/{candidate_id}", status_code=303)
+
+    @app.post("/candidates/{candidate_id}/metadata")
+    def update_metadata(
+        candidate_id: int,
+        title: str = Form(""),
+        description: str = Form(""),
+        hashtags: str = Form(""),
+    ) -> RedirectResponse:
+        """Persist human edits; the plan file stays the source of truth."""
+        if db.get_candidate(candidate_id) is None:
+            raise HTTPException(status_code=404, detail="Candidate not found")
+        paths = EditPaths.for_candidate(settings, candidate_id)
+        if not paths.plan.exists():
+            raise HTTPException(status_code=404, detail="No plan for this candidate")
+
+        plan = EditPlan.load(paths.plan)
+        tags = [_normalize_tag(item) for item in hashtags.split(",") if item.strip()]
+        plan.metadata = MetadataPlan(
+            enabled=plan.metadata.enabled,
+            source="manual",
+            title=title.strip() or None,
+            description=description.strip() or None,
+            hashtags=[tag for tag in tags if tag],
+            thumbnail=plan.metadata.thumbnail,
+            reason="edited by a reviewer",
+        )
+        plan.save(paths.plan)
+
+        current = db.get_current_render(candidate_id)
+        if current is not None:
+            with db.connection() as conn:
+                conn.execute(
+                    "UPDATE renders SET metadata_json = ? WHERE id = ?",
+                    (json.dumps(plan.metadata.to_dict()), current.id),
+                )
+        return RedirectResponse(url=f"/candidates/{candidate_id}", status_code=303)
+
+    @app.get("/renders/{render_id}/media")
+    def render_media(render_id: int) -> FileResponse:
+        render = db.get_render(render_id)
+        if render is None or not render.path:
+            raise HTTPException(status_code=404, detail="Render not found")
+        path = Path(render.path)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Render file missing on disk")
+        return FileResponse(path, media_type="video/mp4")
+
+    @app.get("/candidates/{candidate_id}/download")
+    def download_final(candidate_id: int) -> FileResponse:
+        render = db.get_current_render(candidate_id)
+        if render is None or not render.path:
+            raise HTTPException(status_code=404, detail="No finished render yet")
+        path = Path(render.path)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Render file missing on disk")
+        return FileResponse(path, media_type="video/mp4", filename=path.name)
 
     return app
