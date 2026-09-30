@@ -51,6 +51,22 @@ def _caption_preview(ass_path: Path, *, limit: int = 6) -> list[str]:
     return preview
 
 
+def _resolve_chat_path(raw: str) -> Path | None:
+    """
+    Optional chat evidence from the review form.
+
+    A path the reviewer typed that is not on disk is a 400 naming it, not a 500. Anything that is
+    there but not a chat dump is rejected by `load_chat_json` and reaches the client the same way.
+    """
+    cleaned = raw.strip().strip("\"'")
+    if not cleaned:
+        return None
+    path = Path(cleaned).expanduser()
+    if not path.is_file():
+        raise HTTPException(status_code=400, detail=f"Chat JSON not found: {path}")
+    return path
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     settings.ensure_dirs()
@@ -90,6 +106,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Candidate not found")
         stats = db.stats()
 
+        # `POST /candidates/{id}/render` cuts from the stream's source capture, so the page has to
+        # know whether that file is still there: without it there is nothing to create, and the
+        # pipeline would only record a failed render.
+        stream = db.get_stream(view.candidate.stream_id)
+        source_path = Path(stream.media_path) if stream and stream.media_path else None
+        source_ready = bool(source_path and source_path.exists())
+        last_render = next(iter(db.list_renders(candidate_id, limit=1)), None)
+
         paths = EditPaths.for_candidate(settings, candidate_id)
         plan = None
         if paths.plan.exists():
@@ -106,6 +130,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "reasons": REJECTION_REASONS,
                 "render": db.get_current_render(candidate_id),
                 "plan": plan,
+                "last_render": last_render,
+                "source_path": str(source_path) if source_path else None,
+                "source_ready": source_ready,
+                "clip_width": settings.clip_target_width,
+                "clip_height": settings.clip_target_height,
                 "caption_preview": _caption_preview(paths.captions),
                 "strategies": STRATEGIES,
                 "caption_styles": CAPTION_STYLES,
@@ -153,9 +182,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         strategy: str = Form(""),
         caption_style: str = Form(""),
         caption_emphasis: str = Form(""),
+        chat_path: str = Form(""),
         force: str = Form(""),
     ) -> RedirectResponse:
-        """Re-render one candidate, optionally with overrides (the human escape hatch)."""
+        """
+        Create or re-render one candidate (the human escape hatch).
+
+        A candidate that has never been planned is cut from scratch: `run_edit_pipeline` writes
+        `plan.json` and renders it, falling back to the Phase 1 detection window unless a chat dump
+        is supplied. Options left unset stay at the `config.yaml` defaults.
+        """
         if db.get_candidate(candidate_id) is None:
             raise HTTPException(status_code=404, detail="Candidate not found")
         overrides = EditOverrides(
@@ -163,6 +199,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             caption_style=caption_style or None,
             caption_emphasis=caption_emphasis or None,
         )
+        chat = _resolve_chat_path(chat_path)
         try:
             run_edit_pipeline(
                 settings=settings,
@@ -170,6 +207,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 dry_run=False,
                 force=bool(force),
                 overrides=overrides,
+                chat_path=chat,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

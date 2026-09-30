@@ -17,12 +17,19 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
     return Settings(**base)  # type: ignore[arg-type]
 
 
-def _seed(tmp_path: Path, *, with_final: bool = True, with_plan: bool = True):
+def _seed(
+    tmp_path: Path,
+    *,
+    with_final: bool = True,
+    with_plan: bool = True,
+    media: Path | None = None,
+):
     settings = _settings(tmp_path)
     db = Database(settings.resolved_db_path())
     streamer = db.get_or_create_streamer("jason", "Jason")
+    media_ref = str(media) if media else "vod.ts"
     stream = db.create_stream(
-        streamer.id, "vod", media_path="vod.ts", source_width=1920, source_height=1080
+        streamer.id, "vod", media_path=media_ref, source_width=1920, source_height=1080
     )
     candidate = db.create_candidate(
         stream.id,
@@ -40,7 +47,7 @@ def _seed(tmp_path: Path, *, with_final: bool = True, with_plan: bool = True):
         plan = build_plan(
             candidate=candidate,
             stream=stream,
-            source_path=Path("vod.ts"),
+            source_path=Path(media_ref),
             settings=settings,
         )
         plan.metadata = MetadataPlan(
@@ -112,7 +119,7 @@ def test_candidate_page_shows_the_edit(tmp_path: Path):
     assert "Metadata" in body
 
 
-def test_candidate_page_without_a_plan_still_renders(tmp_path: Path):
+def test_candidate_page_without_a_source_explains_that_it_cannot_create(tmp_path: Path):
     settings, _db, candidate, _render, _paths = _seed(
         tmp_path, with_final=False, with_plan=False
     )
@@ -121,7 +128,122 @@ def test_candidate_page_without_a_plan_still_renders(tmp_path: Path):
     response = client.get(f"/candidates/{candidate.id}")
 
     assert response.status_code == 200
-    assert "Edited clip" not in response.text
+    # `vod.ts` does not exist, so the panel names the missing capture instead of offering a button
+    # whose render could only write a failed `renders` row.
+    assert "No source media on disk" in response.text
+    assert f"/candidates/{candidate.id}/render" not in response.text
+
+
+def test_candidate_page_offers_create_when_the_source_is_on_disk(tmp_path: Path):
+    media = tmp_path / "capture.ts"
+    media.write_bytes(b"\x00" * 64)
+    settings, _db, candidate, _render, _paths = _seed(
+        tmp_path, with_final=False, with_plan=False, media=media
+    )
+    client = TestClient(create_app(settings))
+
+    body = client.get(f"/candidates/{candidate.id}").text
+
+    assert "Edited clip" in body
+    assert "Create clip" in body
+    assert f"/candidates/{candidate.id}/render" in body
+    assert str(media) in body
+    assert 'name="chat_path"' in body
+
+
+def test_candidate_page_offers_render_now_for_a_plan_without_a_render(tmp_path: Path):
+    media = tmp_path / "capture.ts"
+    media.write_bytes(b"\x00" * 64)
+    settings, _db, candidate, _render, _paths = _seed(tmp_path, with_final=False, media=media)
+    client = TestClient(create_app(settings))
+
+    body = client.get(f"/candidates/{candidate.id}").text
+
+    assert "nothing rendered yet" in body
+    assert "Render now" in body
+    assert "Create clip" not in body
+    assert f"/candidates/{candidate.id}/render" in body
+
+
+def test_create_clip_route_renders_a_candidate_with_no_plan(monkeypatch, tmp_path: Path):
+    media = tmp_path / "capture.ts"
+    media.write_bytes(b"\x00" * 64)
+    settings, _db, candidate, _render, _paths = _seed(
+        tmp_path, with_final=False, with_plan=False, media=media
+    )
+    captured: dict = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {"planned": 1}
+
+    monkeypatch.setattr("clippy.api.app.run_edit_pipeline", fake_run)
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        f"/candidates/{candidate.id}/render", data={}, follow_redirects=False
+    )
+
+    assert response.status_code == 303
+    assert captured["candidate_ids"] == [candidate.id]
+    assert captured["dry_run"] is False
+    assert captured["chat_path"] is None
+
+
+def test_render_route_passes_chat_evidence(monkeypatch, tmp_path: Path):
+    media = tmp_path / "capture.ts"
+    media.write_bytes(b"\x00" * 64)
+    chat = tmp_path / "chat.json"
+    chat.write_text("[]", encoding="utf-8")
+    settings, _db, candidate, _render, _paths = _seed(
+        tmp_path, with_final=False, with_plan=False, media=media
+    )
+    captured: dict = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {"planned": 1}
+
+    monkeypatch.setattr("clippy.api.app.run_edit_pipeline", fake_run)
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        f"/candidates/{candidate.id}/render",
+        data={"chat_path": f"  {chat}  "},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert captured["chat_path"] == chat
+
+
+def test_render_route_rejects_a_missing_chat_file(tmp_path: Path):
+    settings, _db, candidate, _render, _paths = _seed(tmp_path)
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        f"/candidates/{candidate.id}/render",
+        data={"chat_path": str(tmp_path / "nope.json")},
+    )
+
+    assert response.status_code == 400
+    assert "Chat JSON not found" in response.json()["detail"]
+
+
+def test_candidate_page_reports_the_last_failed_render(tmp_path: Path):
+    media = tmp_path / "capture.ts"
+    media.write_bytes(b"\x00" * 64)
+    settings, db, candidate, _render, _paths = _seed(
+        tmp_path, with_final=False, with_plan=False, media=media
+    )
+    db.create_render(
+        candidate.id, kind="plan", status="failed", error="render failed: ffmpeg exploded"
+    )
+    client = TestClient(create_app(settings))
+
+    body = client.get(f"/candidates/{candidate.id}").text
+
+    assert "render failed: ffmpeg exploded" in body
 
 
 def test_download_serves_the_final_file(tmp_path: Path):

@@ -1,6 +1,36 @@
 {% extends "base.html" %}
 {% block title %}Candidate #{{ view.candidate.id }}{% endblock %}
 {% block content %}
+{% macro render_options(strategies, caption_styles, caption_emphasis_modes) %}
+  {# An empty select falls back to config.yaml - not to the values the plan already records - so the
+     panel copy above the form says so rather than implying the current choice is kept. #}
+  <label>
+    Layout
+    <select name="strategy">
+      <option value="">Config default</option>
+      {% for option in strategies %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>
+    Captions
+    <select name="caption_style">
+      <option value="">Config default</option>
+      {% for option in caption_styles %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>
+    Emphasis
+    <select name="caption_emphasis">
+      <option value="">Config default</option>
+      {% for option in caption_emphasis_modes %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
+    </select>
+  </label>
+  <label>
+    Chat evidence
+    <input type="text" name="chat_path" placeholder="optional chat JSON path" />
+  </label>
+  <label><input type="checkbox" name="force" value="1" /> redo cached steps</label>
+{% endmacro %}
 <p><a href="/">← Back</a></p>
 <h1>
   {% if view.candidate.caption %}
@@ -61,30 +91,44 @@
       </details>
     {% endif %}
     <p><a href="/candidates/{{ view.candidate.id }}/download">Download final.mp4</a></p>
+    {% if last_render and last_render.status == 'failed' %}
+      <p class="muted">The last attempt failed: {{ last_render.error }}</p>
+    {% endif %}
     <form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/render">
-      <select name="strategy">
-        <option value="">Layout (keep current)</option>
-        {% for option in strategies %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
-      </select>
-      <select name="caption_style">
-        <option value="">Captions (keep current)</option>
-        {% for option in caption_styles %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
-      </select>
-      <select name="caption_emphasis">
-        <option value="">Emphasis (keep current)</option>
-        {% for option in caption_emphasis_modes %}<option value="{{ option }}">{{ option }}</option>{% endfor %}
-      </select>
-      <label><input type="checkbox" name="force" value="1" /> redo cached steps</label>
+      {{ render_options(strategies, caption_styles, caption_emphasis_modes) }}
       <button type="submit">Re-render</button>
     </form>
   </section>
-{% elif plan %}
+{% elif plan or source_ready %}
   <section class="panel">
     <h2>Edited clip</h2>
-    <p class="muted">Planned (stage: {{ plan.stage }}) but nothing rendered yet.</p>
+    {% if plan %}
+      <p class="muted">Planned (stage: {{ plan.stage }}) but nothing rendered yet.</p>
+    {% else %}
+      <p class="muted">
+        No edit planned for this candidate yet. Creating one cuts the detection window out of
+        {% if source_path %}<code>{{ source_path }}</code>{% else %}the stream capture{% endif %},
+        removes dead air, burns in captions and renders a {{ clip_width }}×{{ clip_height }} clip.
+        Add a chat dump below and the cut comes from the chat reaction instead of the fixed window.
+      </p>
+    {% endif %}
+    {% if last_render and last_render.status == 'failed' %}
+      <p class="muted">The last attempt failed: {{ last_render.error }}</p>
+    {% endif %}
     <form class="actions detail-actions" method="post" action="/candidates/{{ view.candidate.id }}/render">
-      <button type="submit">Render now</button>
+      {{ render_options(strategies, caption_styles, caption_emphasis_modes) }}
+      <button type="submit">{{ 'Render now' if plan else 'Create clip' }}</button>
     </form>
+  </section>
+{% else %}
+  <section class="panel">
+    <h2>Edited clip</h2>
+    <p class="muted">
+      No source media on disk for this stream, so there is nothing to cut a clip from.
+      {% if source_path %}<br /><code>{{ source_path }}</code>{% endif %}
+      Capture the VOD at high quality with <code>clippy-capture --vod &lt;id-or-url&gt;</code>, then
+      refresh this page.
+    </p>
   </section>
 {% endif %}
 

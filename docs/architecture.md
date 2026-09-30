@@ -688,9 +688,9 @@ The settings travel in three hops, and knowing the middle hop explains most surp
 
 ```text
 config.yaml / Settings  →  CLI flags (--strategy, --caption-style, --caption-emphasis)
-                            or the UI re-render form  →  EditOverrides
-                                                       → build_plan folds them into plan.json
-                                                       → the stage reads the PLAN, not Settings
+                            or the UI render form  →  EditOverrides
+                                                     → build_plan folds them into plan.json
+                                                     → the stage reads the PLAN, not Settings
 ```
 
 `build_plan` resolves `override or settings` once, so `plan.json` is the record of what was
@@ -706,16 +706,27 @@ Anything a reviewer sees is therefore in `plan.json`: `layout.strategy` (request
 | surface | can change |
 | --- | --- |
 | CLI (`clippy-edit`) | `--strategy`, `--caption-style`, `--caption-emphasis`, `--deadair-mode`, `--no-captions`, `--force`, `--keep-intermediate` |
-| UI re-render form | `strategy`, `caption_style`, `caption_emphasis` and `force` only - `deadair_mode` is CLI/config-only, while `crop_bias`, `zoom`, `target_width` and `target_height` have `EditOverrides` fields (now honoured by composition) but no CLI flag or UI field yet |
+| UI render form (create or re-render) | `strategy`, `caption_style`, `caption_emphasis`, `force` and an optional `chat_path` chat dump - `deadair_mode` is CLI/config-only, while `crop_bias`, `zoom`, `target_width` and `target_height` have `EditOverrides` fields (now honoured by composition) but no CLI flag or UI field yet |
 | `config.yaml` / `CLIPPY_*` env | everything else: target size and fps, fonts, colours, cue rules, `caption_safe_area`, track backend, `facecam_box` |
 
 Both interactive surfaces build an `EditOverrides` and `build_plan` folds it into the plan it
 writes, so an override applies to the candidates being (re-)planned in that invocation and the
 result is durable in `plan.json` afterwards.
 
-A re-plan that is given no chat evidence (the UI re-render form cannot pass any) keeps the
-boundaries already recorded in `plan.json` for the same source, rather than silently resetting the
-cut to the Phase 1 window; point it at a different source and the recorded bounds are discarded.
+The UI form is also the only *creation* surface. A candidate with no `plan.json` gets a **Create
+clip** form that plans and renders in one synchronous pass, so the first clip never needs a CLI step;
+the page names the stream's missing capture instead of offering a button whose render could only
+fail. A render that raises records a failed `renders` row, and the candidate page shows the error
+above the form.
+
+An empty select means the `config.yaml` default for that option, not the value the plan already
+records, so a form submitted untouched re-plans layout and caption style from config - the same rule
+the CLI follows. The labels say "config default" rather than implying the current choice is kept.
+
+A re-plan that is given no chat evidence keeps the boundaries already recorded in `plan.json` for
+the same source, rather than silently resetting the cut to the Phase 1 window; point it at a
+different source and the recorded bounds are discarded. Naming a chat dump in the form is what lets a
+re-render re-derive the cut from the chat reaction curve, which the CLI does with `--chat`.
 
 ---
 
@@ -1021,7 +1032,7 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 | `GET /candidates/{id}`                | Detail page: video, extract reason, caption/transcript, raw signals JSON, review form |
 | `POST /candidates/{id}/review`        | Form post with `decision`, `reason_code`, `notes`; 303 redirect back to `/` |
 | `GET /media/{id}`                     | Streams the extracted MP4 from `candidates.media_path`        |
-| `POST /candidates/{id}/render`        | Synchronous re-render with `strategy`, `caption_style`, `caption_emphasis` and `force` overrides; 303 back to the candidate |
+| `POST /candidates/{id}/render`        | Synchronous create/re-render with `strategy`, `caption_style`, `caption_emphasis`, `chat_path` and `force` overrides; 303 back to the candidate. Works before a plan exists; a chat path that is not on disk is a 400 |
 | `POST /candidates/{id}/metadata`      | Saves reviewer-edited title/description/hashtags into `plan.json` |
 | `GET /renders/{id}/media`             | Streams one render revision from `renders.path`               |
 | `GET /candidates/{id}/download`       | `final.mp4` as an attachment                                  |
@@ -1069,7 +1080,7 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 | `src/clippy/edit/metadata.py`     | Clip metadata and thumbnail extraction                                                             |
 | `src/clippy/store/db.py`          | SQLite schema, column migrations, dataclasses, `Database` repository, `REJECTION_REASONS`         |
 | `src/clippy/eval/export.py`       | `export_reviews_json/_csv`, `precision_report`                                                     |
-| `src/clippy/api/app.py`           | FastAPI app factory, routes, Jinja2 templates, static mount                                        |
+| `src/clippy/api/app.py`           | FastAPI app factory, routes (review, create/re-render with optional chat evidence, metadata, download/media), Jinja2 templates, static mount |
 | `src/clippy/ui/`                  | `templates/base.html`, `index.html`, `candidate.html`; `static/style.css`                          |
 | `tests/test_core.py`              | Chat loading, keyword boundaries, coalescing, chat+audio boosting, DB review/caption round-trip    |
 | `tests/test_caption.py`           | Extract reasons, chat-context despam, caption HTTP parse, per-run cap, skip-without-key, migrations |
@@ -1204,6 +1215,10 @@ and the 1.0 s same-kind dedupe gap in `chat/signals._dedupe_nearby`.
 | Channel not live / empty recording (live)   | `RuntimeError` after the recording window: "Live recording produced no media"      |
 | Live mode without IRC credentials           | Fail fast at the top of `run_live_pipeline`, before starting streamlink            |
 | Media deleted but DB row remains            | `GET /media/{id}` 404 "Media file missing on disk"; the card still renders          |
+| Candidate page, no plan, capture on disk    | Edit panel offers **Create clip**; plans and renders in one synchronous pass         |
+| Candidate page, no source capture on disk   | Edit panel names the missing path and offers no button                               |
+| Review render fails (ffmpeg, bad source)    | `renders` row `status = 'failed'` with the error; the page shows it above the form    |
+| Chat path typed into the render form is not on disk | 400 `Chat JSON not found: <path>`, and no render is attempted                 |
 
 The governing principle is **degrade, never drop**: a candidate with no media is still a signal
 worth reviewing, a candidate with no caption is still reviewable, and a reviewer's decision is
@@ -1235,6 +1250,7 @@ stated reason, so the next person can judge whether the tradeoff still holds.
 | editing | No speech veto in dead air | The guard band, minimum gap and payoff protection already keep cuts off the main moment | One ASR pass on `base.mp4` plus a time remap through the keep segments |
 | editing | `conversation` splits the frame in half | A wrongly-guessed speaker is worse than a static split | Per-region motion, or diarization |
 | editing | Interpolated word timings when a server returns none | Cues stay in sync at segment granularity; only karaoke precision suffers | A server that returns word timings |
+| editing | A UI re-render with the selects left empty re-plans layout and captions from `config.yaml`, not from the values already in `plan.json` | Boundaries are preserved on purpose, so the clip still starts where the reviewer saw it, and the option labels say "config default" instead of implying the current choice is kept | Preselect `plan.layout.strategy` / `plan.captions.style` in the form, or let an unset override inherit from the same-source plan |
 | editing | Review re-render is synchronous | One clip takes seconds, and a reviewer expects to wait | A job queue |
 | editing | Vertical framing is inert on a 16:9 capture | A 9:16 crop of a 16:9 frame already uses the whole height, so there is no headroom to move within: the tracked vertical position changes framing only for sources taller than 9:16, though it always informs the caption band | A taller source, or a crop that zooms in far enough to create headroom |
 | editing | Face detection is frontal-only and opt-in | `layout_track_backend: opencv` uses the cascade bundled with the wheel, so it needs no model download and never runs unless asked; it misses profile faces and can be fooled by face-like patterns, which is why a clip below `face_min_hit_ratio` falls back to motion instead | A DNN detector (OpenCV 5's `FaceDetectorYN` with a downloaded model, or mediapipe) behind the same seam, which would also remove the opt-in |

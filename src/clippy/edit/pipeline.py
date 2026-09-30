@@ -117,9 +117,9 @@ def _existing_plan(settings: Settings, job: EditJob) -> EditPlan | None:
     """
     The plan a candidate already has, if it was built from the same source.
 
-    A re-render supplies no chat evidence, so it cannot re-derive a chat-driven cut; reusing the
-    recorded plan keeps the boundaries the reviewer already saw. A different source path means the
-    recorded bounds describe footage that is no longer there, so they are discarded.
+    A re-render without chat evidence cannot re-derive a chat-driven cut; reusing the recorded plan
+    keeps the boundaries the reviewer already saw. A different source path means the recorded bounds
+    describe footage that is no longer there, so they are discarded.
     """
     paths = EditPaths.for_candidate(settings, job.candidate.id)
     if not paths.plan.exists():
@@ -208,9 +208,9 @@ def run_edit_pipeline(
                 evidence_bounds += 1
 
         # A re-plan with no chat evidence cannot re-derive the cut, and the Phase 1 window would
-        # quietly replace a chat-derived one - which is the normal case for the UI re-render form,
-        # because it has no chat to pass. Keep the boundaries the candidate already has when the
-        # source is unchanged rather than silently moving the clip.
+        # quietly replace a chat-derived one - the usual case for the UI render form, which passes
+        # no chat unless the reviewer names a dump. Keep the boundaries the candidate already has
+        # when the source is unchanged rather than silently moving the clip.
         if decision is not None:
             bounds = decision.bounds
             boundary_evidence = {

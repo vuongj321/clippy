@@ -103,10 +103,19 @@ Notes:
 uv run clippy-serve        # http://127.0.0.1:8000
 ```
 
+A candidate that has no clip yet offers **Create clip** on its page, so the first edit needs no CLI
+step: the form cuts the detection window out of the stream's capture, removes dead air, burns in
+captions and writes `final.mp4`. The capture has to be on disk (`clippy-capture`); when it is not,
+the page names the missing path instead of offering a button that could only fail. Type an optional
+chat JSON path into the form and the cut comes from the chat reaction curve instead of the fixed
+detection window - the same evidence `--chat` gives the CLI.
+
 Each candidate page plays the finished clip, shows the chosen boundaries, the dead air that was
 removed, the layout (strategy, upscale factor, layer list), the caption cues and the warnings the
 render produced. From there you can edit the metadata, download `final.mp4`, or re-render with a
-different layout/caption style.
+different layout/caption style. Options left unset use the `config.yaml` defaults - they do not
+inherit the values already recorded in `plan.json` - and a render that fails is reported on the page
+above the form rather than swallowed.
 
 ## Artifacts
 

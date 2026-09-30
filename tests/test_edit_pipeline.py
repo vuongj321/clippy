@@ -274,8 +274,8 @@ def test_replan_without_chat_keeps_the_chat_derived_bounds(tmp_path: Path):
     first = EditPlan.load(paths.plan)
     assert first.bounds.method == "signal_evidence"
 
-    # The UI re-render form has no chat to pass, so a re-plan must not reset the clip back to the
-    # Phase 1 window it was cut away from.
+    # A render submitted without a chat dump cannot re-derive the cut, so a re-plan must not reset the
+    # clip back to the Phase 1 window it was cut away from.
     run_edit_pipeline(settings=settings, candidate_ids=[candidate.id], dry_run=True)
 
     again = EditPlan.load(paths.plan)
