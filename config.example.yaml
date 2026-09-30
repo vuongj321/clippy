@@ -1,4 +1,5 @@
-# Clippy configuration (optional). Env vars with CLIPPY_ prefix override these.
+# Clippy configuration (optional). Values set here override CLIPPY_* environment variables, not the
+# other way round — see the layering note in docs/architecture.md#configuration.
 
 # Paths (defaults: ./data)
 # data_dir: data
@@ -38,7 +39,8 @@ ffprobe_path: ffprobe
 # twitch_irc_nick: ""
 # twitch_irc_oauth: ""
 
-# Captions (also set CLIPPY_OPENAI_API_KEY in .env). Not burned into MP4s yet.
+# Review-UI caption + transcript for NEW runs (set CLIPPY_OPENAI_API_KEY in .env).
+# The burned-in caption track for rendered clips is configured under "Burned-in captions" below.
 # openai_base_url: https://api.openai.com/v1
 # asr_model: whisper-1
 # caption_model: gpt-4o-mini

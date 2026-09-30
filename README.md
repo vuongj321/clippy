@@ -158,9 +158,10 @@ Editing knobs: `clip_target_width`/`clip_target_height`/`clip_fps`, `layout_stra
 `metadata_title_max_chars`, `metadata_max_hashtags`, `thumbnail_enabled`, `thumbnail_overlay_text`.
 
 **What each editing setting actually does** — the layout strategies, the caption style presets, the
-word-emphasis modes and the caption band — is documented in section 21 of `docs/architecture.md`.
+word-emphasis modes and the caption band — is documented in
+[Changing the edit: the three surfaces](docs/architecture.md#changing-the-edit-the-three-surfaces).
 
 **Known gaps:** dead air is cut without a speech veto, `conversation` splits the frame rather than
 tracking who is speaking, and a vertical crop can only reframe a source that is taller than 9:16 —
-see section 19 of `docs/architecture.md` for why, and what a real fix would need.
+see [Known gaps](docs/architecture.md#known-gaps) for why, and what a real fix would need.
 
