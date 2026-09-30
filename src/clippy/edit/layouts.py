@@ -24,7 +24,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from clippy.edit.track import TrackPoint
+from clippy.caption.styles import resolve_style
+from clippy.edit.track import TrackPoint, crop_center_y
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,20 @@ ALL_STRATEGIES = (
 WARN_LOW_RES = "low_resolution_layout"
 WARN_TRACK_FALLBACK = "tracking_unavailable"
 WARN_UPSCALE = "upscale_exceeds_threshold"
+WARN_CAPTION_BAND = "caption_band_moved"
 
 MIN_TRACKED_SOURCE_HEIGHT = 720
 BLUR_SIGMA = 24
 PANEL_GAP = 8
 TRACK_DEADBAND = 0.02
 MAX_TRACK_SEGMENTS = 24
+
+# Caption-band geometry, used only to decide whether a caption would land on the subject.
+# ASS default line spacing is close enough for a strip this size, and the subject is modelled
+# as a box around the motion centroid rather than a point, because the plan is to avoid the
+# subject, not to measure it.
+CAPTION_LINE_HEIGHT = 1.25
+SUBJECT_BOX_HEIGHT_RATIO = 0.25
 
 
 @dataclass
@@ -131,6 +140,7 @@ class CompositionPlan:
     upscale_factor: float
     segments: list[LayoutSegment] = field(default_factory=list)
     caption_prefer_top: bool = False
+    caption_bottom_coverage: float = 0.0
     subject_track: list[TrackPoint] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -149,10 +159,18 @@ class CompositionPlan:
             "source_height": self.source_height,
             "upscale_factor": round(self.upscale_factor, 3),
             "caption_prefer_top": self.caption_prefer_top,
+            "caption_bottom_coverage": round(self.caption_bottom_coverage, 4),
             "segment_count": len(self.segments),
             "segments": [segment.to_dict() for segment in self.segments],
             "track": [
-                [round(point.t, 3), round(point.x, 4)] for point in self.subject_track
+                [
+                    round(point.t, 3),
+                    round(point.x, 4),
+                    round(point.y, 4),
+                    round(point.width, 4),
+                    round(point.height, 4),
+                ]
+                for point in self.subject_track
             ],
             "warnings": list(self.warnings),
         }
@@ -174,10 +192,17 @@ class CompositionPlan:
                 if isinstance(item, dict)
             ],
             caption_prefer_top=bool(data.get("caption_prefer_top", False)),
+            caption_bottom_coverage=float(data.get("caption_bottom_coverage", 0.0)),
             subject_track=[
-                TrackPoint(t=float(item[0]), x=float(item[1]), y=0.5)
+                TrackPoint(
+                    t=float(item[0]),
+                    x=float(item[1]),
+                    y=float(item[2]) if len(item) > 2 else 0.5,
+                    width=float(item[3]) if len(item) > 3 else 0.0,
+                    height=float(item[4]) if len(item) > 4 else 0.0,
+                )
                 for item in (data.get("track") or [])
-                if isinstance(item, (list, tuple)) and len(item) == 2
+                if isinstance(item, (list, tuple)) and len(item) >= 2
             ],
             warnings=[str(item) for item in (data.get("warnings") or [])],
         )
@@ -292,6 +317,90 @@ def segments_from_track(
 WARN_FACECAM_MISSING = "facecam_box_missing"
 
 
+def caption_bands(
+    height: float,
+    *,
+    font_size: float,
+    settings: Settings,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """
+    Vertical span of the caption band at the bottom and at the top of the canvas.
+
+    Mirrors what the ASS writer does: `caption_margin_v` is the distance from the edge, and the
+    band is as tall as `caption_max_lines` lines of the *resolved style's* text, so the test is
+    made against the strip that will actually be drawn.
+    """
+    band = font_size * CAPTION_LINE_HEIGHT * settings.caption_max_lines
+    margin = float(settings.caption_margin_v)
+    bottom = (max(0.0, height - margin - band), max(0.0, height - margin))
+    top = (margin, min(float(height), margin + band))
+    return bottom, top
+
+
+def caption_band_coverage(
+    track: Sequence[TrackPoint],
+    segments: Sequence[LayoutSegment],
+    *,
+    source_height: float,
+    canvas_height: float,
+    band: tuple[float, float],
+) -> float:
+    """
+    Fraction of sampled frames whose subject box overlaps `band` on the canvas.
+
+    The tracked vertical position is in source space, so it is mapped through the layer that
+    actually carries it: the point is looked up in each layer's source rectangle for the
+    segment covering that moment, and a frame counts once any matching layer puts the subject
+    - modelled as a box of `SUBJECT_BOX_HEIGHT_RATIO` of the canvas around the motion centroid -
+    inside the band.
+
+    With no usable evidence (an empty track, no segments, a degenerate band or frame) the result
+    is 0.0, which leaves `auto` on the bottom band: being wrong about the subject is worse than
+    being conservative about the caption.
+    """
+    if not track or not segments or source_height <= 0 or canvas_height <= 0:
+        return 0.0
+    band_top, band_bottom = band
+    if band_bottom <= band_top:
+        return 0.0
+
+    hits = 0
+    sampled = 0
+    for point in track:
+        segment = next(
+            (item for item in segments if item.start <= point.t < item.end), None
+        )
+        if segment is None:
+            continue
+        sampled += 1
+        source_y = min(max(point.y, 0.0), 1.0) * source_height
+        # A detected subject box is what the tracker really saw. Without one - the motion
+        # tracker reports no box - the subject is assumed to be `SUBJECT_BOX_HEIGHT_RATIO` of the
+        # frame tall, which keeps the motion path conservative rather than confident.
+        half_subject = (
+            max(0.01, point.height) / 2.0
+            if point.height > 0
+            else SUBJECT_BOX_HEIGHT_RATIO / 2.0
+        )
+        source_top = min(max(point.y - half_subject, 0.0), 1.0) * source_height
+        source_bottom = min(max(point.y + half_subject, 0.0), 1.0) * source_height
+        for layer in segment.layers:
+            if layer.kind == "blur" or layer.src[3] <= 0:
+                continue
+            src_y, src_height = layer.src[1], layer.src[3]
+            if not (src_y <= source_y <= src_y + src_height):
+                continue
+            scale = layer.dst[3] / src_height
+            canvas_top = layer.dst[1] + (source_top - src_y) * scale
+            canvas_bottom = layer.dst[1] + (source_bottom - src_y) * scale
+            if canvas_top <= band_bottom and canvas_bottom >= band_top:
+                hits += 1
+                break
+    if sampled == 0:
+        return 0.0
+    return hits / sampled
+
+
 def plan_layout(
     *,
     requested: str,
@@ -304,9 +413,14 @@ def plan_layout(
     settings: Settings,
     track: Sequence[TrackPoint] = (),
     facecam_box: Sequence[float] | None = None,
+    caption_style: str = "",
 ) -> CompositionPlan:
     """
     Build the composition plan for one clip (pure: it never touches media).
+
+    `caption_style` is the style that will be burned in (empty means `settings.caption_style`).
+    It is needed here because the caption band is measured against the real text height, and
+    avoiding that band is what can move the captions to the top.
 
     Returns segments with static layers, plus the warnings a reviewer needs to judge the
     result: a low-resolution source, a missing facecam box, or a crop that upscales more
@@ -327,13 +441,23 @@ def plan_layout(
     duration = max(0.0, float(duration))
     prefer_top = False
     if resolved == STRATEGY_IRL:
+        # Vertical headroom is a property of the geometry, not of the tracker: see `crop_center_y`.
+        crop_height = crop_rect(source_width, source_height, width / height)[3]
+        crop_y = crop_center_y(
+            track, source_height=source_height, crop_height=crop_height
+        )
         segments = [
             LayoutSegment(
                 start=start,
                 end=end,
                 crop_x=crop_x,
                 layers=_irl_layers(
-                    source_width, source_height, width, height, crop_x=crop_x
+                    source_width,
+                    source_height,
+                    width,
+                    height,
+                    crop_x=crop_x,
+                    crop_y=crop_y,
                 ),
             )
             for start, end, crop_x in segments_from_track(track, duration)
@@ -375,6 +499,37 @@ def plan_layout(
     if factor > settings.quality_warn_upscale and WARN_UPSCALE not in warnings:
         warnings.append(WARN_UPSCALE)
 
+    # Caption band. A facecam panel owns the bottom of the frame by construction; otherwise the
+    # subject track can say the same thing for a full-frame layout. `caption_avoid_ratio` is the
+    # tolerance for the subject merely dipping into the band, and anything unmeasurable leaves the
+    # captions where they were.
+    bottom_band, top_band = caption_bands(
+        height,
+        font_size=resolve_style(caption_style or settings.caption_style, settings).font_size,
+        settings=settings,
+    )
+    bottom_coverage = caption_band_coverage(
+        track,
+        segments,
+        source_height=source_height,
+        canvas_height=height,
+        band=bottom_band,
+    )
+    if (
+        not prefer_top
+        and bottom_coverage > settings.caption_avoid_ratio
+        and bottom_coverage
+        >= caption_band_coverage(
+            track,
+            segments,
+            source_height=source_height,
+            canvas_height=height,
+            band=top_band,
+        )
+    ):
+        prefer_top = True
+        warnings.append(WARN_CAPTION_BAND)
+
     return CompositionPlan(
         strategy=requested,
         resolved_strategy=resolved,
@@ -386,6 +541,7 @@ def plan_layout(
         upscale_factor=round(factor, 3),
         segments=segments,
         caption_prefer_top=prefer_top,
+        caption_bottom_coverage=round(bottom_coverage, 4),
         subject_track=list(track),
         warnings=warnings,
     )
@@ -465,9 +621,16 @@ def _irl_layers(
     height: float,
     *,
     crop_x: float,
+    crop_y: float = 0.5,
 ) -> list[LayoutLayer]:
     """A canvas-shaped crop of the source, centred on the tracked subject."""
-    src = crop_rect(source_width, source_height, width / height, center_x=crop_x)
+    src = crop_rect(
+        source_width,
+        source_height,
+        width / height,
+        center_x=crop_x,
+        center_y=crop_y,
+    )
     return [
         LayoutLayer(kind="video", src=src, dst=(0.0, 0.0, width, height), z=1)
     ]

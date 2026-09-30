@@ -31,7 +31,20 @@ CENTER_PRIOR = 0.35
 DEFAULT_SMOOTHING = 0.12
 NONE_BACKEND = "none"
 MOTION_BACKEND = "motion"
-SUPPORTED_BACKENDS = (NONE_BACKEND, MOTION_BACKEND, "opencv", "mediapipe")
+FACE_BACKEND = "opencv"
+SUPPORTED_BACKENDS = (NONE_BACKEND, MOTION_BACKEND, FACE_BACKEND, "mediapipe")
+
+
+@dataclass(frozen=True)
+class MotionProfile:
+    """Frame-to-frame motion energy per column and per row, from one decode."""
+
+    columns: np.ndarray  # (frames - 1, width)
+    rows: np.ndarray  # (frames - 1, height)
+
+    @property
+    def frame_count(self) -> int:
+        return int(self.columns.shape[0])
 
 
 @dataclass(frozen=True)
@@ -41,6 +54,10 @@ class TrackPoint:
     t: float
     x: float
     y: float
+    # Subject box size as fractions of the frame. `0.0` means "unknown", which is what the
+    # motion tracker reports: the caption band then assumes a default subject height.
+    width: float = 0.0
+    height: float = 0.0
 
 
 def centroid_from_energy(energy: np.ndarray, *, center_prior: float = CENTER_PRIOR) -> float:
@@ -83,7 +100,15 @@ def resample_track(
     chosen: list[TrackPoint] = []
     for moment in times:
         nearest = min(ordered, key=lambda point: abs(point.t - moment))
-        chosen.append(TrackPoint(t=float(moment), x=nearest.x, y=nearest.y))
+        chosen.append(
+            TrackPoint(
+                t=float(moment),
+                x=nearest.x,
+                y=nearest.y,
+                width=nearest.width,
+                height=nearest.height,
+            )
+        )
     return chosen
 
 
@@ -98,7 +123,7 @@ def _require_ffmpeg(ffmpeg_path: str) -> str:
     return ffmpeg
 
 
-def sample_motion_profile(
+def sample_motion_profiles(
     media_path: Path,
     *,
     duration_seconds: float,
@@ -107,12 +132,14 @@ def sample_motion_profile(
     width: int = SAMPLE_WIDTH,
     height: int = SAMPLE_HEIGHT,
     ffmpeg_path: str = "ffmpeg",
-) -> np.ndarray:
+) -> MotionProfile:
     """
-    Frame-to-frame motion energy per column, shaped ``(frames - 1, width)``.
+    Frame-to-frame motion energy per column and per row, from a single decode.
 
     Decoding to a 64x36 grayscale stream keeps this cheap (a 30 s clip is a few MB of raw
-    frames) and the diff between consecutive frames is what the crop follows.
+    frames). Both axes come from the same frames: the horizontal profile drives the crop, and
+    the vertical profile answers the much coarser question of which part of the frame the
+    motion lives in.
     """
     ffmpeg = _require_ffmpeg(ffmpeg_path)
     cmd = [ffmpeg, "-v", "error"]
@@ -132,18 +159,83 @@ def sample_motion_profile(
         "pipe:1",
     ]
     proc = subprocess.run(cmd, capture_output=True, check=False)
-    if proc.returncode != 0:
-        raise RuntimeError(
-            "ffmpeg motion decode failed: "
-            f"{proc.stderr.decode('utf-8', errors='replace')}"
-        )
     frame_bytes = width * height
     frame_count = len(proc.stdout) // frame_bytes
     if frame_count < 2:
-        return np.zeros((0, width), dtype=np.float64)
+        if proc.returncode != 0 and frame_count == 0:
+            raise RuntimeError(
+                "ffmpeg motion decode failed: "
+                f"{proc.stderr.decode('utf-8', errors='replace')}"
+            )
+        return MotionProfile(
+            columns=np.zeros((0, width), dtype=np.float64),
+            rows=np.zeros((0, height), dtype=np.float64),
+        )
+    if proc.returncode != 0:
+        # Twitch VODs carry damaged packets, which ffmpeg reports as a non-zero exit even though
+        # it decoded usable frames. Frames on disk beat a clean exit code.
+        logger.warning(
+            "ffmpeg reported %s while sampling motion from %s; using the %d frames it produced",
+            proc.returncode,
+            media_path.name,
+            frame_count,
+        )
     buffer = np.frombuffer(proc.stdout[: frame_count * frame_bytes], dtype=np.uint8)
     volume = buffer.reshape(frame_count, height, width).astype(np.float64)
-    return np.abs(np.diff(volume, axis=0)).sum(axis=1)
+    motion = np.abs(np.diff(volume, axis=0))
+    return MotionProfile(columns=motion.sum(axis=1), rows=motion.sum(axis=2))
+
+
+def sample_motion_profile(
+    media_path: Path,
+    *,
+    duration_seconds: float,
+    start_seconds: float = 0.0,
+    sample_fps: float = DEFAULT_SAMPLE_FPS,
+    width: int = SAMPLE_WIDTH,
+    height: int = SAMPLE_HEIGHT,
+    ffmpeg_path: str = "ffmpeg",
+) -> np.ndarray:
+    """Per-column motion energy, for callers that only need the horizontal profile."""
+    return sample_motion_profiles(
+        media_path,
+        duration_seconds=duration_seconds,
+        start_seconds=start_seconds,
+        sample_fps=sample_fps,
+        width=width,
+        height=height,
+        ffmpeg_path=ffmpeg_path,
+    ).columns
+
+
+def crop_center_y(
+    track: Sequence[TrackPoint],
+    *,
+    source_height: float,
+    crop_height: float,
+) -> float:
+    """
+    Vertical crop position that keeps the subject in frame (0.5 = centred).
+
+    Two guards keep this honest. Without a subject *box* - which is what the motion tracker
+    reports - there is no trustworthy vertical position, so the crop stays centred. And a crop
+    that already spans the full source height has no slack to move within, which is the normal
+    case for a 16:9 capture: a 9:16 crop of a 16:9 frame uses all of its height. Vertical
+    headroom only exists for sources *taller* than 9:16.
+
+    The median of the tracked positions is used rather than the mean, so one stray detection
+    cannot drag the crop, and the result is clamped so the crop never leaves the frame.
+    """
+    if not track or source_height <= 0 or crop_height >= source_height:
+        return 0.5
+    if not any(point.height > 0 for point in track):
+        return 0.5
+
+    positions = sorted(point.y for point in track if point.height > 0)
+    median = positions[len(positions) // 2] * source_height
+    half = crop_height / 2.0
+    centre = min(max(median, half), source_height - half)
+    return min(max(centre / source_height, 0.0), 1.0)
 
 
 def track_subject(
@@ -156,36 +248,81 @@ def track_subject(
     ffmpeg_path: str = "ffmpeg",
 ) -> list[TrackPoint]:
     """
-    Follow the subject's horizontal position across a clip.
+    Follow the subject across a clip: horizontally for the crop, vertically for the captions.
 
-    Returns an empty track (which means "crop centred") when tracking is disabled or a CV
-    backend was requested but is not installed - a layout must never fail because of it.
-    Vertical position is deliberately not tracked: without face detection it would chase
-    noise, and a centred vertical crop is the safer default.
+    `x` drives framing. `y` is a coarse motion centroid, deliberately not used to position a
+    crop - without face detection a vertical crop would chase noise - but it is exactly the
+    right granularity for the caption-band decision, which only needs to know which slice of
+    the canvas the motion occupies *over the whole clip*. The same centre prior is applied to
+    both axes, which keeps the caption decision conservative: the motion has to be consistently
+    low in the frame before captions move.
+
+    Returns an empty track (which means "crop centred", and no caption evidence) when tracking
+    is disabled or a CV backend was requested but is not installed - a layout must never fail
+    because of it.
     """
     backend = settings.layout_track_backend
     if backend == NONE_BACKEND:
         return []
-    if backend not in (MOTION_BACKEND,):
+    if backend == FACE_BACKEND:
+        # Imported here so the edit package stays importable - and the suite runnable - without
+        # OpenCV installed.
+        from clippy.edit import faces
+
+        if faces.available():
+            try:
+                face_points = faces.face_track(
+                    media_path,
+                    duration_seconds=duration_seconds,
+                    start_seconds=start_seconds,
+                    sample_fps=sample_fps,
+                    width=settings.face_detection_width,
+                    min_size_ratio=settings.face_min_size_ratio,
+                    min_hit_ratio=settings.face_min_hit_ratio,
+                    ffmpeg_path=ffmpeg_path,
+                    ffprobe_path=settings.ffprobe_path,
+                )
+            except Exception:  # a detector failure must never fail a render
+                logger.exception("Face tracking failed; falling back to motion tracking")
+            else:
+                if face_points:
+                    return face_points
+                logger.info(
+                    "No usable face in %s; falling back to motion tracking",
+                    media_path.name,
+                )
+        else:
+            logger.info(
+                "layout_track_backend=%r needs opencv-python-headless, which is not "
+                "importable; falling back to motion tracking",
+                backend,
+            )
+    elif backend != MOTION_BACKEND:
         logger.info(
-            "Track backend %r is unavailable; falling back to motion tracking", backend
+            "Track backend %r is not implemented; falling back to motion tracking", backend
         )
 
-    profiles = sample_motion_profile(
+    profiles = sample_motion_profiles(
         media_path,
         start_seconds=start_seconds,
         duration_seconds=duration_seconds,
         sample_fps=sample_fps,
         ffmpeg_path=ffmpeg_path,
     )
-    if profiles.shape[0] == 0:
+    if profiles.frame_count == 0:
         return []
 
-    raw = [centroid_from_energy(row) for row in profiles]
-    smoothed = smooth_track(raw, alpha=settings.layout_smoothing)
+    horizontal = smooth_track(
+        [centroid_from_energy(row) for row in profiles.columns],
+        alpha=settings.layout_smoothing,
+    )
+    vertical = smooth_track(
+        [centroid_from_energy(row) for row in profiles.rows],
+        alpha=settings.layout_smoothing,
+    )
     step = 1.0 / max(sample_fps, 1e-6)
     return [
-        TrackPoint(t=(index + 0.5) * step, x=value, y=0.5)
-        for index, value in enumerate(smoothed)
+        TrackPoint(t=(index + 0.5) * step, x=value, y=vertical[index])
+        for index, value in enumerate(horizontal)
     ]
 

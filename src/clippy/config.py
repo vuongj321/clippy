@@ -84,7 +84,9 @@ class Settings(BaseSettings):
     caption_enabled: bool = True
     caption_style: Literal["karaoke_highlight", "block_pop", "minimal"] = "karaoke_highlight"
     caption_font: str = "Arial"
-    caption_font_size: int = 54
+    # `None` keeps each preset's own size (44 for minimal, 54 for karaoke_highlight, 60 for
+    # block_pop); setting it forces one size on every style.
+    caption_font_size: int | None = None
     caption_max_chars_per_line: int = 18
     caption_max_lines: int = 2
     caption_max_cue_seconds: float = 2.2
@@ -110,6 +112,12 @@ class Settings(BaseSettings):
     layout_track_backend: Literal["none", "motion", "opencv", "mediapipe"] = "motion"
     layout_smoothing: float = 0.12
     layout_zoom: float = 1.0
+    # `layout_track_backend: opencv` only. Detection runs on small grayscale frames, so the width
+    # is a speed/accuracy tradeoff, and the hit ratio is the gate that stops a busy background
+    # from steering the framing: below it the clip falls back to motion tracking.
+    face_detection_width: int = 480
+    face_min_size_ratio: float = 0.06
+    face_min_hit_ratio: float = 0.2
     facecam_box: str = ""
     quality_warn_upscale: float = 2.0
 
