@@ -21,10 +21,15 @@ from clippy.caption.asr import (
     transcribe_words,
 )
 from clippy.caption.ass import escape_ass_text, format_timestamp, write_ass
-from clippy.caption.styles import caption_anchor, resolve_style
+from clippy.caption.emphasis import (
+    parse_emphasis_response,
+    transcript_word_forms,
+    validate_emphasis_words,
+)
+from clippy.caption.styles import caption_anchor, resolve_anchor, resolve_style
 from clippy.config import Settings
 from clippy.edit.captions import generate_captions
-from clippy.edit.plan import EditPaths, EditPlan, build_plan
+from clippy.edit.plan import WARN_EMPHASIS_FALLBACK, EditPaths, EditPlan, build_plan
 from clippy.store.db import Candidate, Stream
 
 
@@ -434,3 +439,190 @@ def test_generate_captions_respects_emphasis_off(monkeypatch, tmp_path: Path):
     assert result.emphasis == set()
 
 
+
+
+
+def _style_alignment(path: Path) -> str:
+    """Pull the Alignment field out of the generated ASS style line."""
+    line = next(
+        item
+        for item in path.read_text(encoding="utf-8").splitlines()
+        if item.startswith("Style: Caption")
+    )
+    return line.split(",")[18]
+
+
+class _FakeResp:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def test_resolve_anchor_maps_every_band(tmp_path: Path):
+    settings = _settings(tmp_path)
+    style = resolve_style("karaoke_highlight", settings)
+
+    assert resolve_anchor(style, safe_area="bottom", prefer_top=False)[1] == "bottom"
+    assert resolve_anchor(style, safe_area="middle", prefer_top=False)[1] == "middle"
+    assert resolve_anchor(style, safe_area="top", prefer_top=False)[1] == "top"
+    assert resolve_anchor(style, safe_area="bottom", prefer_top=False)[0].alignment == 2
+    assert resolve_anchor(style, safe_area="middle", prefer_top=False)[0].alignment == 5
+    assert resolve_anchor(style, safe_area="top", prefer_top=False)[0].alignment == 8
+
+
+def test_resolve_anchor_explicit_band_ignores_the_subject(tmp_path: Path):
+    """`auto` follows the frame; an explicit choice is the reviewer's and must win."""
+    settings = _settings(tmp_path)
+    style = resolve_style("karaoke_highlight", settings)
+
+    # prefer_top asks for the top band, but the reviewer pinned the captions to the bottom.
+    pinned, anchor = resolve_anchor(style, safe_area="bottom", prefer_top=True)
+    assert anchor == "bottom"
+    assert pinned.alignment == 2
+
+    # `auto` keeps the frame-aware behaviour.
+    assert resolve_anchor(style, safe_area="auto", prefer_top=True)[1] == "top"
+    assert resolve_anchor(style, safe_area="auto", prefer_top=False)[1] == "bottom"
+
+
+def test_resolve_anchor_unknown_value_falls_back_to_bottom(tmp_path: Path):
+    """A stale config value must not fail a render."""
+    settings = _settings(tmp_path)
+    style = resolve_style("karaoke_highlight", settings)
+    resolved, anchor = resolve_anchor(style, safe_area="nonsense", prefer_top=False)
+    assert anchor == "bottom"
+    assert resolved.alignment == 2
+
+
+def test_generate_captions_burns_the_middle_band(monkeypatch, tmp_path: Path):
+    settings, plan, paths = _captions_plan(tmp_path, caption_safe_area="middle")
+    monkeypatch.setattr("clippy.edit.captions.transcribe_words", lambda *a, **k: _payload())
+
+    result = generate_captions(plan, paths, settings=settings)
+
+    assert result.anchor == "middle"
+    assert _style_alignment(paths.captions) == "5"
+    result.commit(plan)
+    assert plan.captions.anchor == "middle"
+
+
+def test_generate_captions_burns_the_top_band_without_frame_evidence(
+    monkeypatch, tmp_path: Path
+):
+    settings, plan, paths = _captions_plan(tmp_path, caption_safe_area="top")
+    monkeypatch.setattr("clippy.edit.captions.transcribe_words", lambda *a, **k: _payload())
+
+    result = generate_captions(plan, paths, settings=settings)
+
+    assert result.anchor == "top"
+    assert _style_alignment(paths.captions) == "8"
+
+
+def test_parse_emphasis_response_handles_bullets_and_punctuation():
+    tokens = parse_emphasis_response("Here you go:\n- CRAZY,\n1. CLIP IT\n")
+    # Order is preserved, punctuation is gone, and list markers become plain tokens that
+    # validation then rejects because they were never spoken.
+    assert tokens == ["here", "you", "go", "crazy", "1", "clip", "it"]
+
+
+def test_validate_emphasis_words_drops_anything_that_was_not_said():
+    allowed = {"this", "is", "crazy"}
+    # "banana" was never said, "clip that" is not one word, and duplicates collapse.
+    kept = validate_emphasis_words(
+        ["CRAZY", "banana", "clip that", "crazy", "is"], allowed=allowed, limit=12
+    )
+    assert kept == {"crazy", "is"}
+
+
+def test_validate_emphasis_words_respects_the_cap():
+    allowed = {"a", "b", "c"}
+    assert len(validate_emphasis_words(["a", "b", "c"], allowed=allowed, limit=2)) == 2
+
+
+def test_transcript_word_forms_matches_the_ass_writer():
+    cues = build_cues([_w("THIS", 0.0, 0.3), _w("crazy!", 0.4, 0.9)], uppercase=False)
+    # The ASS writer matches on `word.strip().strip(".,!?\"'()[]").lower()`.
+    assert transcript_word_forms(cues) == {"this", "crazy"}
+
+
+
+
+def test_generate_captions_uses_the_llm_emphasis_when_asked(monkeypatch, tmp_path: Path):
+    settings, plan, paths = _captions_plan(tmp_path, caption_emphasis="llm")
+    monkeypatch.setattr("clippy.edit.captions.transcribe_words", lambda *a, **k: _payload())
+
+    seen: dict = {}
+
+    def fake_post(url, *, headers, json, timeout):
+        seen["url"] = url
+        seen["model"] = json["model"]
+        return _FakeResp({"choices": [{"message": {"content": "crazy\nbanana"}}]})
+
+    monkeypatch.setattr("clippy.caption.emphasis.httpx.post", fake_post)
+
+    result = generate_captions(plan, paths, settings=settings)
+
+    assert result.applied is True
+    # "banana" was never spoken, so only the real word survives validation.
+    assert result.emphasis == {"crazy"}
+    assert result.emphasis_source == "llm"
+    assert result.emphasis_note is None
+    assert seen["url"].endswith("/chat/completions")
+    assert seen["model"] == settings.caption_model
+    result.commit(plan)
+    assert plan.captions.emphasis_source == "llm"
+    assert WARN_EMPHASIS_FALLBACK not in plan.warning_codes()
+
+
+def test_generate_captions_falls_back_to_heuristic_emphasis(monkeypatch, tmp_path: Path):
+    settings, plan, paths = _captions_plan(tmp_path, caption_emphasis="llm")
+    monkeypatch.setattr("clippy.edit.captions.transcribe_words", lambda *a, **k: _payload())
+
+    def boom(*args, **kwargs):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr("clippy.caption.emphasis.httpx.post", boom)
+
+    result = generate_captions(plan, paths, settings=settings)
+
+    assert result.applied is True
+    assert "crazy" in result.emphasis  # the heuristic still produced words
+    assert result.emphasis_source == "heuristic_fallback"
+    assert result.emphasis_note is not None
+    result.commit(plan)
+    assert WARN_EMPHASIS_FALLBACK in plan.warning_codes()
+
+
+def test_generate_captions_falls_back_when_the_model_says_nothing_usable(
+    monkeypatch, tmp_path: Path
+):
+    settings, plan, paths = _captions_plan(tmp_path, caption_emphasis="llm")
+    monkeypatch.setattr("clippy.edit.captions.transcribe_words", lambda *a, **k: _payload())
+    monkeypatch.setattr(
+        "clippy.caption.emphasis.httpx.post",
+        lambda *a, **k: _FakeResp({"choices": [{"message": {"content": "banana"}}]}),
+    )
+
+    result = generate_captions(plan, paths, settings=settings)
+
+    assert result.emphasis_source == "heuristic_fallback"
+    assert result.emphasis_note is not None
+    assert "no word from the transcript" in result.emphasis_note
+
+
+def test_generate_captions_honours_the_plan_emphasis_override(monkeypatch, tmp_path: Path):
+    """`--caption-emphasis off` lands in the plan, so the stage has to read the plan."""
+    settings, plan, paths = _captions_plan(tmp_path)
+    plan.captions.emphasis = "off"
+    monkeypatch.setattr("clippy.edit.captions.transcribe_words", lambda *a, **k: _payload())
+
+    result = generate_captions(plan, paths, settings=settings)
+
+    assert settings.caption_emphasis == "heuristic"
+    assert result.emphasis == set()
+    assert result.emphasis_source == "off"

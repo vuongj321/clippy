@@ -9,6 +9,15 @@ from clippy.config import Settings
 # ASS colours are &HAABBGGRR (alpha inverted: 00 is opaque).
 PRESET_NAMES = ("karaoke_highlight", "block_pop", "minimal")
 
+# ASS alignment: 1-3 sit at the bottom, 4-6 in the middle, 7-9 at the top. Clippy always
+# centres horizontally, so only the band matters. These are the values a reviewer picks
+# through `caption_safe_area`, minus `auto` (which is resolved from the frame instead).
+ANCHOR_ALIGNMENTS = {
+    "bottom": 2,
+    "middle": 5,
+    "top": 8,
+}
+
 
 @dataclass(frozen=True)
 class CaptionStyle:
@@ -117,3 +126,26 @@ def caption_anchor(style: CaptionStyle, *, prefer_top: bool) -> tuple[CaptionSty
     if not prefer_top:
         return style, "bottom"
     return replace(style, alignment=8), "top"
+
+
+def resolve_anchor(
+    style: CaptionStyle,
+    *,
+    safe_area: str,
+    prefer_top: bool,
+) -> tuple[CaptionStyle, str]:
+    """
+    Turn `caption_safe_area` into a concrete ASS alignment.
+
+    `auto` keeps the frame-aware behaviour: bottom band, flipping to the top band when the
+    subject owns the bottom of the frame. `top`, `middle` and `bottom` are explicit reviewer
+    choices, so they ignore `prefer_top` entirely. An unrecognised value falls back to the
+    bottom band rather than raising, because a stale config value must not fail a render.
+
+    Returns the adjusted style and the anchor name for `plan.json`.
+    """
+    if safe_area != "auto":
+        alignment = ANCHOR_ALIGNMENTS.get(safe_area)
+        if alignment is not None:
+            return replace(style, alignment=alignment), safe_area
+    return caption_anchor(style, prefer_top=prefer_top)

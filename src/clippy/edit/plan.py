@@ -42,6 +42,7 @@ WARN_LAYOUT_PENDING = "layout_pending"
 WARN_RESOLUTION_UNKNOWN = "source_resolution_unknown"
 WARN_UPSCALE = "upscale_exceeds_threshold"
 WARN_SOURCE_MISSING = "source_missing"
+WARN_EMPHASIS_FALLBACK = "emphasis_llm_fallback"
 
 
 def _r(value: float | int) -> float:
@@ -208,6 +209,7 @@ class CaptionsPlan:
     word_timestamps: bool = True
     cue_count: int = 0
     emphasis_words: list[str] = field(default_factory=list)
+    emphasis_source: str = ""
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -219,6 +221,7 @@ class CaptionsPlan:
             "word_timestamps": self.word_timestamps,
             "cue_count": self.cue_count,
             "emphasis_words": list(self.emphasis_words),
+            "emphasis_source": self.emphasis_source,
             "reason": self.reason,
         }
 
@@ -232,6 +235,7 @@ class CaptionsPlan:
             word_timestamps=bool(_value(data, "word_timestamps", True)),
             cue_count=int(_value(data, "cue_count", 0)),
             emphasis_words=[str(w) for w in _value(data, "emphasis_words", [])],
+            emphasis_source=str(_value(data, "emphasis_source", "")),
             reason=_value(data, "reason", None),
         )
 
@@ -413,6 +417,7 @@ ARTIFACT_NAMES = {
     "final": "final.mp4",
     "thumbnail": "thumbnail.jpg",
     "metadata": "metadata.json",
+    "compose_inputs": "compose.inputs.json",
 }
 
 
@@ -431,6 +436,7 @@ class EditPaths:
     final: Path
     thumbnail: Path
     metadata: Path
+    compose_inputs: Path
 
     @classmethod
     def for_candidate(cls, settings: Settings, candidate_id: int) -> "EditPaths":
@@ -447,6 +453,7 @@ class EditPaths:
             final=root / ARTIFACT_NAMES["final"],
             thumbnail=root / ARTIFACT_NAMES["thumbnail"],
             metadata=root / ARTIFACT_NAMES["metadata"],
+            compose_inputs=root / ARTIFACT_NAMES["compose_inputs"],
         )
 
     def ensure_root(self) -> Path:

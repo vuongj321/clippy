@@ -18,9 +18,10 @@ from pathlib import Path
 from clippy.caption.align import Cue, build_cues, pick_emphasis_words
 from clippy.caption.asr import TranscriptPayload, transcribe_words
 from clippy.caption.ass import write_ass
-from clippy.caption.styles import CaptionStyle, caption_anchor, resolve_style
+from clippy.caption.emphasis import pick_emphasis_words_llm
+from clippy.caption.styles import CaptionStyle, resolve_anchor, resolve_style
 from clippy.config import Settings
-from clippy.edit.plan import CaptionsPlan, EditPaths, EditPlan
+from clippy.edit.plan import WARN_EMPHASIS_FALLBACK, CaptionsPlan, EditPaths, EditPlan
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ class CaptionResult:
     anchor: str = "bottom"
     reason: str | None = None
     emphasis: set[str] = field(default_factory=set)
+    emphasis_source: str = "none"
+    emphasis_note: str | None = None
 
     def commit(self, plan: EditPlan) -> None:
         """Record the outcome on the plan so later stages and the reviewer can see it."""
@@ -46,8 +49,11 @@ class CaptionResult:
             word_timestamps=plan.captions.word_timestamps,
             cue_count=len(self.cues),
             emphasis_words=sorted(self.emphasis),
+            emphasis_source=self.emphasis_source,
             reason=self.reason,
         )
+        if self.emphasis_note:
+            plan.add_warning(WARN_EMPHASIS_FALLBACK, self.emphasis_note)
 
 
 def _load_or_transcribe(
@@ -88,6 +94,37 @@ def _load_or_transcribe(
     return payload, None
 
 
+def _resolve_emphasis(
+    cues: list[Cue],
+    *,
+    mode: str,
+    settings: Settings,
+) -> tuple[set[str], str, str | None]:
+    """
+    Pick the emphasised words for the requested `caption_emphasis` mode.
+
+    `heuristic` is free and deterministic (`caption.align`). `llm` asks the caption model and
+    falls back to the heuristic when the answer is unusable, so a reviewer who asked for model
+    emphasis still gets emphasised words rather than none - the fallback is recorded on the
+    plan as a warning. `off` disables emphasis entirely.
+    """
+    if mode == "off":
+        return set(), "off", None
+    if mode != "llm":
+        return pick_emphasis_words(cues, keywords=settings.chat_keywords), "heuristic", None
+
+    requested, failure = pick_emphasis_words_llm(
+        cues,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+        model=settings.caption_model,
+    )
+    if requested:
+        return requested, "llm", None
+    fallback = pick_emphasis_words(cues, keywords=settings.chat_keywords)
+    return fallback, "heuristic_fallback", failure
+
+
 def generate_captions(
     plan: EditPlan,
     paths: EditPaths,
@@ -100,8 +137,13 @@ def generate_captions(
     Transcribe, align and write ``captions.ass`` for the trimmed clip.
 
     `prefer_top` comes from composition (M6/M7): when the subject sits in the lower band
-    of the frame, captions move up so they never cover it. Emphasised words come from the
-    transcript plus the chat keywords, and `caption_emphasis: off` disables them.
+    of the frame, captions move up so they never cover it. It only applies to
+    `caption_safe_area: auto`; an explicit `top`/`middle`/`bottom` is a reviewer choice and
+    wins over the frame evidence.
+
+    The style and the emphasis mode are read from `plan.captions` rather than straight from
+    `Settings`, because `build_plan` has already folded any `--caption-style` /
+    `--caption-emphasis` override into the plan.
     """
     if not plan.captions.enabled:
         return CaptionResult(applied=False, reason="captions disabled for this render")
@@ -118,7 +160,7 @@ def generate_captions(
     if payload is None:
         return CaptionResult(applied=False, reason=failure)
 
-    style = resolve_style(settings.caption_style, settings)
+    style = resolve_style(plan.captions.style or settings.caption_style, settings)
     cues = build_cues(
         payload.words(),
         max_chars_per_line=style.max_chars_per_line,
@@ -135,12 +177,12 @@ def generate_captions(
             reason="transcript produced no cues",
         )
 
-    emphasis: set[str] = set()
-    if settings.caption_emphasis != "off":
-        emphasis = pick_emphasis_words(cues, keywords=settings.chat_keywords)
+    emphasis, emphasis_source, emphasis_note = _resolve_emphasis(
+        cues, mode=plan.captions.emphasis or settings.caption_emphasis, settings=settings
+    )
 
-    style, anchor = caption_anchor(
-        style, prefer_top=prefer_top and settings.caption_safe_area == "auto"
+    style, anchor = resolve_anchor(
+        style, safe_area=settings.caption_safe_area, prefer_top=prefer_top
     )
     write_ass(
         cues,
@@ -158,5 +200,7 @@ def generate_captions(
         style=style,
         anchor=anchor,
         emphasis=emphasis,
+        emphasis_source=emphasis_source,
+        emphasis_note=emphasis_note,
     )
 
