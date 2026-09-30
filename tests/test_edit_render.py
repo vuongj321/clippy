@@ -21,6 +21,7 @@ from clippy.edit.render import (
     compose_vertical,
     escape_filter_path,
     extract_base,
+    plan_composition,
 )
 from clippy.store.db import Candidate, Stream
 
@@ -239,6 +240,34 @@ def test_composition_fingerprint_notices_every_input(tmp_path: Path):
     assert _composition_inputs(paths, layout, settings=settings, ass_path=paths.captions) != first
     louder = _settings(tmp_path, render_crf=18)
     assert _composition_inputs(paths, layout, settings=louder, ass_path=paths.captions) != first
+
+
+def test_plan_composition_honours_the_plan_strategy(monkeypatch, tmp_path: Path):
+    """
+    The requested strategy lives in `plan.layout`, so composition must read the plan rather than
+    the config default - otherwise a UI/CLI choice never reaches the render (the bug this covers).
+    """
+    settings, plan, paths = _plan(tmp_path, ts=120.0)
+    paths.ensure_root()
+    paths.trimmed.write_bytes(b"trimmed")
+    # What `EditOverrides(strategy="fit_blur")` folds into the plan.
+    plan.layout.strategy = "fit_blur"
+
+    monkeypatch.setattr(
+        "clippy.edit.render.probe_dimensions", lambda *args, **kwargs: (1920, 1080)
+    )
+    monkeypatch.setattr(
+        "clippy.edit.render.track_subject", lambda *args, **kwargs: []
+    )
+
+    layout = plan_composition(plan, paths, settings=settings, duration=10.0)
+
+    assert layout.strategy == "fit_blur"
+    assert layout.resolved_strategy == "fit_blur"
+    # `_record_layout` must keep the requested value, not overwrite it with the config default.
+    assert plan.layout.strategy == "fit_blur"
+    assert plan.layout.resolved_strategy == "fit_blur"
+    assert paths.layout.exists()
 
 
 def test_build_composition_filter_composes_and_burns_captions(tmp_path: Path):

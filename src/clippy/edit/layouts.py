@@ -414,6 +414,8 @@ def plan_layout(
     track: Sequence[TrackPoint] = (),
     facecam_box: Sequence[float] | None = None,
     caption_style: str = "",
+    crop_bias: float = 0.0,
+    zoom: float = 1.0,
 ) -> CompositionPlan:
     """
     Build the composition plan for one clip (pure: it never touches media).
@@ -446,22 +448,28 @@ def plan_layout(
         crop_y = crop_center_y(
             track, source_height=source_height, crop_height=crop_height
         )
-        segments = [
-            LayoutSegment(
-                start=start,
-                end=end,
-                crop_x=crop_x,
-                layers=_irl_layers(
-                    source_width,
-                    source_height,
-                    width,
-                    height,
-                    crop_x=crop_x,
-                    crop_y=crop_y,
-                ),
+        segments = []
+        for start, end, crop_x in segments_from_track(track, duration):
+            # `crop_bias` is the manual nudge for a mis-framed crop. The nudged position is what
+            # the layer is built from *and* what `layout.json` records, so the record matches what
+            # was actually drawn instead of the pre-nudge track.
+            placed_x = clamp(crop_x + crop_bias, 0.0, 1.0)
+            segments.append(
+                LayoutSegment(
+                    start=start,
+                    end=end,
+                    crop_x=placed_x,
+                    layers=_irl_layers(
+                        source_width,
+                        source_height,
+                        width,
+                        height,
+                        crop_x=placed_x,
+                        crop_y=crop_y,
+                        zoom=zoom,
+                    ),
+                )
             )
-            for start, end, crop_x in segments_from_track(track, duration)
-        ]
     elif resolved == STRATEGY_GAMING:
         segments = [
             LayoutSegment(
@@ -622,18 +630,54 @@ def _irl_layers(
     *,
     crop_x: float,
     crop_y: float = 0.5,
+    zoom: float = 1.0,
 ) -> list[LayoutLayer]:
-    """A canvas-shaped crop of the source, centred on the tracked subject."""
-    src = crop_rect(
-        source_width,
-        source_height,
-        width / height,
+    """A canvas-shaped crop of the source, centred on the tracked subject.
+
+    `zoom` above 1.0 tightens the crop around the subject, so a crop that leaves the subject
+    too small can be pulled in; the tighter rect needs more upscale, which the plan surfaces.
+    """
+    src = _tighten_crop(
+        crop_rect(
+            source_width,
+            source_height,
+            width / height,
+            center_x=crop_x,
+            center_y=crop_y,
+        ),
+        zoom=zoom,
         center_x=crop_x,
         center_y=crop_y,
+        source_width=source_width,
+        source_height=source_height,
     )
     return [
         LayoutLayer(kind="video", src=src, dst=(0.0, 0.0, width, height), z=1)
     ]
+
+
+def _tighten_crop(
+    rect: tuple[float, float, float, float],
+    *,
+    zoom: float,
+    center_x: float,
+    center_y: float,
+    source_width: float,
+    source_height: float,
+) -> tuple[float, float, float, float]:
+    """
+    Shrink a crop by `zoom` around a normalised point and keep it inside the frame.
+
+    `zoom <= 1.0` is the identity, so the default layout is exactly what it was before the
+    knob existed and a config that never sets `layout_zoom` cannot change a pixel.
+    """
+    _, _, width, height = rect
+    if zoom <= 1.0 or width <= 0 or height <= 0:
+        return rect
+    width, height = width / zoom, height / zoom
+    x = clamp(center_x * source_width - width / 2.0, 0.0, max(0.0, source_width - width))
+    y = clamp(center_y * source_height - height / 2.0, 0.0, max(0.0, source_height - height))
+    return (x, y, width, height)
 
 
 def _gaming_layers(

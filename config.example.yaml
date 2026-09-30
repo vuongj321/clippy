@@ -79,6 +79,7 @@ clip_fps: 30                   # 0 follows the source fps
 layout_strategy: auto          # auto | fit_blur | irl | gaming | conversation
 layout_track_backend: motion   # none | motion | opencv (face detector) | mediapipe
 layout_smoothing: 0.12         # crop-pan responsiveness (1.0 = no smoothing)
+layout_zoom: 1.0              # tighten the tracked crop around the subject (irl only)
 quality_warn_upscale: 2.0
 # Face backend only (`layout_track_backend: opencv`)
 # face_detection_width: 480    # width of the grayscale frames the cascade sees

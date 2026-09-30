@@ -253,6 +253,73 @@ def test_plan_round_trip_keeps_boundary_evidence(tmp_path: Path):
     assert EditPlan.from_dict(plan.to_dict()).to_dict() == plan.to_dict()
 
 
+def test_replan_without_chat_keeps_the_chat_derived_bounds(tmp_path: Path):
+    media = _media_file(tmp_path)
+    settings, _db, _stream, candidate = _seed(tmp_path, media=media, source_ts=100.0)
+    chat = tmp_path / "chat.json"
+    chat.write_text(
+        json.dumps(
+            [
+                {"ts": 95.0 + index * 0.5, "user": "chatter", "text": "clip it"}
+                for index in range(21)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    run_edit_pipeline(
+        settings=settings, candidate_ids=[candidate.id], dry_run=True, chat_path=chat
+    )
+    paths = EditPaths.for_candidate(settings, candidate.id)
+    first = EditPlan.load(paths.plan)
+    assert first.bounds.method == "signal_evidence"
+
+    # The UI re-render form has no chat to pass, so a re-plan must not reset the clip back to the
+    # Phase 1 window it was cut away from.
+    run_edit_pipeline(settings=settings, candidate_ids=[candidate.id], dry_run=True)
+
+    again = EditPlan.load(paths.plan)
+    assert again.bounds.method == "signal_evidence"
+    assert again.bounds.start == pytest.approx(first.bounds.start)
+    assert again.bounds.end == pytest.approx(first.bounds.end)
+    assert again.boundary_evidence == first.boundary_evidence
+    assert WARN_BOUNDARIES_PENDING not in again.warning_codes()
+
+
+def test_replan_from_a_different_source_ignores_the_recorded_bounds(tmp_path: Path):
+    media = _media_file(tmp_path)
+    settings, _db, _stream, candidate = _seed(tmp_path, media=media, source_ts=100.0)
+    chat = tmp_path / "chat.json"
+    chat.write_text(
+        json.dumps(
+            [
+                {"ts": 95.0 + index * 0.5, "user": "chatter", "text": "clip it"}
+                for index in range(21)
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_edit_pipeline(
+        settings=settings, candidate_ids=[candidate.id], dry_run=True, chat_path=chat
+    )
+
+    # A different capture means the recorded bounds describe footage that is gone, so they must be
+    # discarded rather than re-cut positionally onto the new source.
+    other = tmp_path / "other.ts"
+    other.write_bytes(b"\x00" * 32)
+    run_edit_pipeline(
+        settings=settings,
+        candidate_ids=[candidate.id],
+        dry_run=True,
+        source_path=other,
+    )
+
+    switched = EditPlan.load(EditPaths.for_candidate(settings, candidate.id).plan)
+    assert switched.source_path == str(other)
+    assert switched.bounds.method == "phase1_window"
+    assert WARN_BOUNDARIES_PENDING in switched.warning_codes()
+
+
 def _job(candidate_id: int, *, score: float, ts: float) -> EditJob:
     candidate = Candidate(
         id=candidate_id,

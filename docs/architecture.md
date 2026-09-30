@@ -694,22 +694,28 @@ config.yaml / Settings  →  CLI flags (--strategy, --caption-style, --caption-e
 ```
 
 `build_plan` resolves `override or settings` once, so `plan.json` is the record of what was
-requested, and the caption stage reads `plan.captions.style` and `plan.captions.emphasis` rather
-than `Settings`, which is what makes a CLI or UI override take effect on a re-render. Values with
-no override path (`caption_safe_area`, the cue rules, fonts and colours) are read from `Settings`
-directly. Anything a reviewer sees is therefore in `plan.json`: `layout.strategy` (requested) vs
+requested, and every stage reads the PLAN rather than `Settings`: the caption stage reads
+`plan.captions.style` / `plan.captions.emphasis`, and composition reads `plan.layout` (strategy,
+size, `crop_bias`, `zoom`), which is what makes a CLI or UI override take effect on a re-render
+instead of being replaced by the `config.yaml` default. Values with no override path
+(`caption_safe_area`, the cue rules, fonts and colours) are read from `Settings` directly.
+Anything a reviewer sees is therefore in `plan.json`: `layout.strategy` (requested) vs
 `layout.resolved_strategy` (chosen), `captions.style`, `captions.emphasis`,
 `captions.emphasis_source`, `captions.anchor`, `captions.emphasis_words` and `captions.cue_count`.
 
 | surface | can change |
 | --- | --- |
 | CLI (`clippy-edit`) | `--strategy`, `--caption-style`, `--caption-emphasis`, `--deadair-mode`, `--no-captions`, `--force`, `--keep-intermediate` |
-| UI re-render form | `strategy`, `caption_style`, `caption_emphasis` and `force` only - `deadair_mode` is CLI/config-only, while `crop_bias`, `zoom`, `target_width` and `target_height` have `EditOverrides` fields but no CLI flag or UI field yet |
+| UI re-render form | `strategy`, `caption_style`, `caption_emphasis` and `force` only - `deadair_mode` is CLI/config-only, while `crop_bias`, `zoom`, `target_width` and `target_height` have `EditOverrides` fields (now honoured by composition) but no CLI flag or UI field yet |
 | `config.yaml` / `CLIPPY_*` env | everything else: target size and fps, fonts, colours, cue rules, `caption_safe_area`, track backend, `facecam_box` |
 
 Both interactive surfaces build an `EditOverrides` and `build_plan` folds it into the plan it
 writes, so an override applies to the candidates being (re-)planned in that invocation and the
 result is durable in `plan.json` afterwards.
+
+A re-plan that is given no chat evidence (the UI re-render form cannot pass any) keeps the
+boundaries already recorded in `plan.json` for the same source, rather than silently resetting the
+cut to the Phase 1 window; point it at a different source and the recorded bounds are discarded.
 
 ---
 
@@ -754,8 +760,8 @@ Supporting knobs, all of which only matter once a crop strategy is chosen:
 | `layout_track_backend` | `motion` | `none` disables tracking (and warns), which also leaves the caption band where it is because there is no evidence; `motion` uses a numpy motion map; `opencv` uses the bundled Haar face cascade for both a subject box and a vertical position (see below); `mediapipe` is accepted but not implemented and falls back to motion |
 | `layout_smoothing` | `0.12` | crop-pan responsiveness; `1.0` is unsmoothed and visibly twitchy |
 | `facecam_box` | `""` | `"x,y,w,h"`; fractions when the values are `<= 1`, else pixels |
-| `layout_zoom` | `1.0` | zoom clamp on the tracked crop |
-| `crop_bias` | `0.0` | manual nudge for a mis-framed crop; override-only, so there is no config key - set it through `EditOverrides` |
+| `layout_zoom` | `1.0` | tightens the tracked crop around the subject (above `1.0` the crop shrinks, so it upscales more); `irl` only |
+| `crop_bias` | `0.0` | horizontal nudge (normalised) for a mis-framed `irl` crop; override-only, so there is no config key - set it through `EditOverrides` |
 
 Two internal constants shape the look and are not configurable: a crop only moves when the
 subject moves beyond `TRACK_DEADBAND` (0.02), and one clip is capped at `MAX_TRACK_SEGMENTS`

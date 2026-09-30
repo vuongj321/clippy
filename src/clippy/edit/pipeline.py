@@ -24,6 +24,7 @@ from clippy.edit.metadata import capture_thumbnail, generate_metadata
 from clippy.edit.plan import (
     EditOverrides,
     EditPaths,
+    EditPlan,
     MetadataPlan,
     build_plan,
 )
@@ -112,6 +113,27 @@ def _thumbnail_time(cues: Sequence[Any], duration: float) -> float:
     return max(0.0, duration / 2.0)
 
 
+def _existing_plan(settings: Settings, job: EditJob) -> EditPlan | None:
+    """
+    The plan a candidate already has, if it was built from the same source.
+
+    A re-render supplies no chat evidence, so it cannot re-derive a chat-driven cut; reusing the
+    recorded plan keeps the boundaries the reviewer already saw. A different source path means the
+    recorded bounds describe footage that is no longer there, so they are discarded.
+    """
+    paths = EditPaths.for_candidate(settings, job.candidate.id)
+    if not paths.plan.exists():
+        return None
+    try:
+        existing = EditPlan.load(paths.plan)
+    except Exception:
+        logger.warning("Ignoring unreadable plan %s", paths.plan)
+        return None
+    if existing.source_path != str(job.source_path):
+        return None
+    return existing
+
+
 def run_edit_pipeline(
     *,
     settings: Settings,
@@ -185,21 +207,31 @@ def run_edit_pipeline(
             if decision.bounds.method != "phase1_window":
                 evidence_bounds += 1
 
+        # A re-plan with no chat evidence cannot re-derive the cut, and the Phase 1 window would
+        # quietly replace a chat-derived one - which is the normal case for the UI re-render form,
+        # because it has no chat to pass. Keep the boundaries the candidate already has when the
+        # source is unchanged rather than silently moving the clip.
+        if decision is not None:
+            bounds = decision.bounds
+            boundary_evidence = {
+                "evidence": decision.evidence.to_dict(),
+                "adjustments": list(decision.adjustments),
+            }
+        else:
+            previous = _existing_plan(settings, job)
+            bounds = previous.bounds if previous is not None else None
+            boundary_evidence = (
+                previous.boundary_evidence if previous is not None else None
+            )
+
         plan = build_plan(
             candidate=job.candidate,
             stream=job.stream,
             source_path=job.source_path,
             settings=settings,
             overrides=overrides,
-            bounds=decision.bounds if decision is not None else None,
-            boundary_evidence=(
-                {
-                    "evidence": decision.evidence.to_dict(),
-                    "adjustments": list(decision.adjustments),
-                }
-                if decision is not None
-                else None
-            ),
+            bounds=bounds,
+            boundary_evidence=boundary_evidence,
         )
         if source_offset_seconds is not None:
             plan.source_offset_seconds = source_offset_seconds

@@ -188,8 +188,10 @@ def generate_captions(
         cues,
         style,
         path=paths.captions,
-        width=settings.clip_target_width,
-        height=settings.clip_target_height,
+        # The plan is the record of the requested size, so a target-size override keeps the ASS
+        # PlayRes (what libass scales against) in step with the canvas it is burned onto.
+        width=plan.layout.width or settings.clip_target_width,
+        height=plan.layout.height or settings.clip_target_height,
         emphasis=emphasis,
     )
     return CaptionResult(

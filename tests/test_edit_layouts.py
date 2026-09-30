@@ -52,6 +52,8 @@ def _plan(
     source=(1920, 1080),
     track=(),
     facecam_box=None,
+    crop_bias=0.0,
+    zoom=1.0,
     **overrides,
 ):
     settings = _settings(tmp_path, **overrides)
@@ -66,6 +68,8 @@ def _plan(
         settings=settings,
         track=list(track),
         facecam_box=facecam_box,
+        crop_bias=crop_bias,
+        zoom=zoom,
     )
 
 
@@ -220,6 +224,31 @@ def test_plan_layout_irl_crop_fills_the_canvas(tmp_path: Path):
     # 1080 / 607.5 = 1.78x: normal for a 9:16 crop from 1080p, under the warning bar.
     assert plan.upscale_factor == pytest.approx(1.778, abs=0.01)
     assert WARN_UPSCALE not in plan.warnings
+
+
+def test_plan_layout_applies_zoom_and_crop_bias(tmp_path: Path):
+    _settings_obj, plain = _plan(tmp_path, requested="irl")
+    _settings_obj, zoomed = _plan(tmp_path, requested="irl", zoom=2.0)
+    _settings_obj, nudged = _plan(tmp_path, requested="irl", crop_bias=0.3)
+
+    plain_src = plain.segments[0].layers[0].src
+    zoomed_src = zoomed.segments[0].layers[0].src
+    # A 2x zoom halves the crop, so the same canvas needs twice the upscale.
+    assert zoomed_src[2] == pytest.approx(plain_src[2] / 2.0)
+    assert zoomed_src[3] == pytest.approx(plain_src[3] / 2.0)
+    assert zoomed.upscale_factor == pytest.approx(plain.upscale_factor * 2.0, abs=0.01)
+
+    # The bias nudges the crop to the right and `layout.json` records the nudged position.
+    assert nudged.segments[0].layers[0].src[0] > plain_src[0]
+    assert nudged.segments[0].crop_x == pytest.approx(0.8)
+
+
+def test_plan_layout_zoom_and_bias_are_identity_by_default(tmp_path: Path):
+    """The defaults must not move a pixel, so an untouched config renders exactly as before."""
+    _settings_obj, plain = _plan(tmp_path, requested="irl")
+    _settings_obj, explicit = _plan(tmp_path, requested="irl", crop_bias=0.0, zoom=1.0)
+
+    assert [s.to_dict() for s in plain.segments] == [s.to_dict() for s in explicit.segments]
 
 
 def test_plan_layout_flags_a_heavy_upscale(tmp_path: Path):

@@ -440,20 +440,26 @@ def plan_composition(
         settings=settings,
         ffmpeg_path=settings.ffmpeg_path,
     )
+    # Every reviewer-facing choice is read from the PLAN, not `Settings`. `build_plan` resolved
+    # `override or settings` once, so `plan.layout` already holds the strategy, size, bias and zoom
+    # that were asked for; reading them back here is what makes a CLI/UI override reach the render
+    # instead of being silently replaced by the config default.
     layout = plan_layout(
-        requested=settings.layout_strategy,
+        requested=plan.layout.strategy or settings.layout_strategy,
         source_width=width,
         source_height=height,
-        width=settings.clip_target_width,
-        height=settings.clip_target_height,
-        fps=settings.clip_fps or 30,
+        width=plan.layout.width or settings.clip_target_width,
+        height=plan.layout.height or settings.clip_target_height,
+        fps=plan.layout.fps or (settings.clip_fps or 30),
         duration=duration,
         settings=settings,
         track=track,
-        facecam_box=settings.parsed_facecam_box(),
+        facecam_box=plan.layout.facecam_box or settings.parsed_facecam_box(),
         # `build_plan` already folded any style override in, so the caption band is measured
         # against the style that is actually going to be burned in.
         caption_style=plan.captions.style,
+        crop_bias=plan.layout.crop_bias,
+        zoom=plan.layout.zoom,
     )
     paths.layout.write_text(json.dumps(layout.to_dict(), indent=2), encoding="utf-8")
     _record_layout(plan, layout, settings=settings)
@@ -529,9 +535,9 @@ def _composition_inputs(
         "captions": captions,
         "layout": _text_digest(json.dumps(layout.to_dict(), sort_keys=True)),
         "encode": {
-            "width": settings.clip_target_width,
-            "height": settings.clip_target_height,
-            "fps": settings.clip_fps or 30,
+            "width": layout.width,
+            "height": layout.height,
+            "fps": layout.fps,
             "crf": settings.render_crf,
             "preset": settings.render_preset,
         },
@@ -637,7 +643,7 @@ def compose_vertical(
         "-pix_fmt",
         "yuv420p",
         "-r",
-        str(settings.clip_fps or 30),
+        str(layout.fps or (settings.clip_fps or 30)),
     ]
     if has_audio:
         cmd += ["-c:a", "aac", "-b:a", "192k"]
