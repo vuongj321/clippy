@@ -5,26 +5,28 @@ source at a time (VOD/local media first, live second), flags moments that look i
 from chat and audio signals, cuts those moments into short playable windows, and records a
 human approve/reject decision for each one.
 
-It deliberately does **not** publish, edit, rank with a learned model, or make autonomous
-clipping decisions. Optional ASR and a short UI caption can label a window for the reviewer;
-they do not change score, ranking, or the cut. The only question the system answers is:
-*can we consistently surface moments a human would clip?* The measurable answer is the
+It deliberately does **not** publish, rank with a learned model, or make autonomous clipping
+decisions: it produces a small ranked set of candidate moments, an optional rendered vertical clip
+for each one, and whatever labels a human gives them. ASR-driven captions can label a window for
+the reviewer; they do not change score, ranking, or the cut. The question the detector answers is
+*can we consistently surface moments a human would clip?* — and the measurable answer is the
 **approve rate** over reviewed candidates.
 
 ---
 
 ## 1. Scope and boundaries
 
-| In scope (Phase 1)                                          | Out of scope (by design)                                     |
-| ----------------------------------------------------------- | ------------------------------------------------------------ |
-| One Twitch source per run (local VOD file or live capture)   | Multi-stream concurrency, Redis/Celery/S3                    |
-| Chat rate/keyword signals + audio intensity spikes           | Vision, scene change, face/emotion CV                        |
-| Overlap coalescing into one candidate per moment             | Learned ranker from performance metrics                      |
-| FFmpeg window extraction to local MP4 files                  | Vertical crop, burned-in captions, auto-edit polish          |
-| Optional ASR + short UI caption (API-keyed, capped per run)  | TikTok / YouTube / Instagram publishing                      |
-| SQLite persistence of streams, candidates, reviews           | Twitch Clip API usage (clips are cut locally from media)     |
-| FastAPI + Jinja review UI, approve/reject with reason codes  | Autonomous publish or score changes from the caption model   |
-| Review export (JSON/CSV) + approve-rate report               | Backfill captions on old rows or later re-runs               |
+| In scope                                                     | Out of scope (by design)                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------ |
+| One Twitch source per run (local VOD file or live capture)    | Multi-stream concurrency, Redis/Celery/S3                    |
+| Chat rate/keyword signals + audio intensity spikes            | Scene-change and emotion CV (a face cascade is used only to frame a crop) |
+| Overlap coalescing into one candidate per moment              | Learned ranker from performance metrics                      |
+| FFmpeg window extraction to local MP4 files                   | Multi-clip composition, transitions, music                   |
+| Optional ASR + short UI caption (API-keyed, capped per run)   | TikTok / YouTube / Instagram publishing                      |
+| Vertical 1080x1920 render: reframe, dead air, burned-in captions, loudness, metadata | Twitch Clip API usage (clips are cut locally from media) |
+| SQLite persistence of streams, candidates, reviews, renders   | Autonomous publish or score changes from a caption model     |
+| FastAPI + Jinja review UI: approve/reject, re-render, download | Backfill captions on old rows or later re-runs               |
+| Review export (JSON/CSV) + approve-rate report                | Auto-approval, or any learned editing decision               |
 
 The design principle behind every shortcut: **score is detection confidence, not
 clippability**. Humans decide clippability. ASR and captions are reviewer aids written after
@@ -57,7 +59,13 @@ flowchart TD
   ui --> labels[reviews: approve/reject + reason_code]
   labels --> store
   store --> eval[eval.export: JSON/CSV + approve-rate report]
+  store --> edit[edit: capture → boundaries → dead air → captions → vertical → audio → metadata]
+  edit --> ui
 ```
+
+The detection half of that picture ends at a review decision. The editing half starts from the same
+`store`: `clippy-edit` turns a candidate into a rendered vertical clip and records each attempt as a
+`renders` row, which the same UI then plays back for approval (see *Vertical clip editing*).
 
 Everything downstream of ingest is shared. The VOD path and the live path produce the same
 `VodIngestResult`-shaped object (a media file, chat messages on a stream-relative clock, and
@@ -115,6 +123,8 @@ produces the eval artifacts. The commands are independent processes sharing only
 | `clippy-live`    | `cli.run_live_main`          | Records live via Streamlink + IRC for `--duration`, then runs the same batch path |
 | `clippy-serve`   | `cli.serve_main`             | `uvicorn.run(create_app(settings), host, port)`                              |
 | `clippy-export`  | `cli.export_main`            | Writes `data/exports/reviews.json` + `reviews.csv`, prints the stats report    |
+| `clippy-edit`    | `cli.edit_main`              | Plans and renders vertical clips for candidates: `--candidate`, `--stream`, `--all-pending`, `--dry-run`, `--force`, plus strategy/caption/dead-air overrides; prints a summary JSON |
+| `clippy-capture` | `cli.capture_main`           | Downloads a Twitch VOD at high quality via `streamlink` or `yt-dlp`, verifies the timeline, optionally attaches it to a stream row and prunes `data/source` |
 
 `scripts/*.py` are one-line wrappers around the same functions for people who prefer
 `python scripts/run_vod.py ...`. All commands accept `--config <path>` and call
@@ -128,6 +138,10 @@ produces the eval artifacts. The commands are independent processes sharing only
 | `GET /candidates/{id}`                | Detail page: video, extract reason, caption/transcript, raw signals JSON, review form |
 | `POST /candidates/{id}/review`        | Form post with `decision`, `reason_code`, `notes`; 303 redirect back to `/` |
 | `GET /media/{id}`                     | Streams the extracted MP4 from `candidates.media_path`        |
+| `POST /candidates/{id}/render`        | Synchronous re-render with `strategy`, `caption_style`, `caption_emphasis` and `force` overrides; 303 back to the candidate |
+| `POST /candidates/{id}/metadata`      | Saves reviewer-edited title/description/hashtags into `plan.json` |
+| `GET /renders/{id}/media`             | Streams one render revision from `renders.path`               |
+| `GET /candidates/{id}/download`       | `final.mp4` as an attachment                                  |
 | `GET /api/stats`                      | JSON stats (same payload as the eval report)                  |
 | `/static/*`                           | Mounted `ui/static` (CSS)                                     |
 
@@ -157,18 +171,38 @@ produces the eval artifacts. The commands are independent processes sharing only
 | `src/clippy/caption/chat_context.py` | Windowed, despammed chat payload for the caption model                                      |
 | `src/clippy/caption/asr.py`       | OpenAI-compatible Whisper transcription of the cut MP4                                           |
 | `src/clippy/caption/generate.py`  | `annotate_extracted_candidate`: ASR + short caption; never raises for missing keys/API errors     |
+| `src/clippy/ingest/capture.py`    | HQ VOD download (`streamlink`/`yt-dlp`), timeline alignment reporting, `data/source` pruning     |
+| `src/clippy/ingest/align.py`      | Chat-vs-media offset probe and clip-correlation verification (`verify_offset_with_clips`)         |
+| `src/clippy/edit/pipeline.py`     | Edit orchestration: `run_edit_pipeline`, job resolution/selection, stage sequencing                |
+| `src/clippy/edit/plan.py`         | `EditPlan`, `EditPaths`, `build_plan`, `EditOverrides`, warning codes                              |
+| `src/clippy/edit/boundaries.py`   | `detect_bounds`: clip bounds from chat evidence, with the fixed detection window as fallback       |
+| `src/clippy/edit/render.py`       | `extract_base`, `apply_deadair`, `plan_composition`, `compose_vertical` + the composition fingerprint |
+| `src/clippy/edit/deadair.py`      | Silence detection, guard bands, payoff protection, cut/speed removal                               |
+| `src/clippy/edit/layouts.py`      | Layout strategies, segment/layer plans and the caption-band evidence                               |
+| `src/clippy/edit/track.py`        | Motion tracking (`TrackPoint`), and `crop_center_y` for vertical framing                            |
+| `src/clippy/edit/faces.py`        | Optional OpenCV face detection behind `layout_track_backend: opencv`                               |
+| `src/clippy/edit/captions.py`     | Caption stage: cues, emphasis selection, ASS writing                                               |
+| `src/clippy/edit/audio.py`        | Two-pass loudness normalization with a freshness-aware cache                                       |
+| `src/clippy/edit/metadata.py`     | Clip metadata and thumbnail extraction                                                             |
 | `src/clippy/store/db.py`          | SQLite schema, column migrations, dataclasses, `Database` repository, `REJECTION_REASONS`         |
 | `src/clippy/eval/export.py`       | `export_reviews_json/_csv`, `precision_report`                                                     |
 | `src/clippy/api/app.py`           | FastAPI app factory, routes, Jinja2 templates, static mount                                        |
 | `src/clippy/ui/`                  | `templates/base.html`, `index.html`, `candidate.html`; `static/style.css`                          |
 | `tests/test_core.py`              | Chat loading, keyword boundaries, coalescing, chat+audio boosting, DB review/caption round-trip    |
 | `tests/test_caption.py`           | Extract reasons, chat-context despam, caption HTTP parse, per-run cap, skip-without-key, migrations |
+| `tests/test_edit_*.py`            | Editing maths and stages, cache fingerprints, the edit API, and ffmpeg-gated end-to-end renders     |
+| `tests/test_edit_faces.py`        | Face detection: box selection, hit-ratio gating, backend fallback with and without OpenCV           |
+| `tests/test_ingest_capture_align.py` | Downloader argv building, timeline offset estimation, source pruning                             |
 
 Dependency direction is strictly one-way: `cli → pipeline → {ingest, chat, audio, buffer,
 detect, extract, caption, store}` and `api → {store, config}`. `caption` depends on
 `chat` + `config` and talks to an OpenAI-compatible HTTP API via `httpx`. `eval` depends
-only on `store`. There are no web or media dependencies inside `detect`/`chat`/`audio`,
-which is what keeps the signal logic unit-testable without ffmpeg or network access.
+only on `store`. The edit side reads the same `store`: `edit → {ingest, caption, extract,
+store, config}`, with `edit.pipeline` driving the stages in `edit.render`, `edit.audio`,
+`edit.captions` and `edit.metadata`. There are no web or media dependencies inside
+`detect`/`chat`/`audio`, which is what keeps the signal logic unit-testable without ffmpeg or
+network access; `edit.faces` is the only module that imports OpenCV, and it does so lazily
+inside its functions.
 
 ---
 
@@ -251,7 +285,7 @@ Chat and audio events are fused into `RawDetection` rows:
 - For each chat event, the **nearest unused audio event within 5 seconds** is consumed. The
   fused detection is tagged `kind="chat_audio"`, keeps the chat timestamp, and scores
   `min(1.0, chat.score + 0.5 * audio.score)` — i.e. a chat spike plus a nearby loud moment
-  outranks either alone, which is the strongest signal in the MVP.
+  outranks either alone, which is the strongest signal the detector has.
 - Chat events with no audio partner become `kind=<chat kind>` detections at their own score.
 - Audio events that were never consumed become their own detections, so a loud moment with no
   chat reaction is still surfaced for review.
@@ -325,8 +359,9 @@ bounds, or review status.
    not null the other column. Per-candidate ASR or caption HTTP failures are logged; the
    pipeline continues.
 5. There is **no later pass**. Rerunning the pipeline creates new candidate rows; it does
-   not backfill captions on existing ones. Captions are review-UI and export fields only —
-   they are never burned into the MP4.
+   not backfill captions on existing ones. These captions are review-UI and export fields: the
+   detection pass never writes media. Burned-in captions are a separate track, produced by the
+   edit pipeline from `trimmed.mp4` (see *Vertical clip editing*).
 
 `extract_reason` is independent of this pass. It is derived from signals on every candidate
 and is what the grid shows when no caption exists.
@@ -346,6 +381,7 @@ erDiagram
   STREAMERS ||--o{ STREAMS : has
   STREAMS ||--o{ CANDIDATES : produces
   CANDIDATES ||--o| REVIEWS : "reviewed by"
+  CANDIDATES ||--o{ RENDERS : "rendered as"
 
   STREAMERS {
     int id PK
@@ -374,6 +410,8 @@ erDiagram
     text extract_reason
     text caption
     text transcript
+    text edit_status
+    text edited_media_path
     text status
     text created_at
   }
@@ -385,12 +423,34 @@ erDiagram
     text notes
     text reviewed_at
   }
+  RENDERS {
+    int id PK
+    int candidate_id FK
+    int revision
+    text kind
+    text path
+    text plan_json
+    text transcript_json
+    text captions_path
+    text layout_json
+    text metadata_json
+    int width
+    int height
+    real duration
+    text status
+    text error
+    int is_current
+    text created_at
+  }
 ```
 
-`mode` is constrained to `vod|live`, `status` to `pending|approved|rejected`, and `decision`
-to `approved|rejected`. Indexes: `idx_candidates_stream_score(stream_id, score DESC)` and
-`idx_candidates_status(status)` — the review queue is always "pending, highest score first",
-which these cover.
+`mode` is constrained to `vod|live`, `status` to `pending|approved|rejected`, `decision`
+to `approved|rejected`, `edit_status` to `unrendered|rendering|rendered|failed`, render `kind`
+to `plan|rough|final`, and render `status` to `ok|failed`. Indexes:
+`idx_candidates_stream_score(stream_id, score DESC)`, `idx_candidates_status(status)`,
+`idx_renders_candidate(candidate_id, revision DESC)` and `idx_renders_current(candidate_id,
+is_current)`. The review queue is always "pending, highest score first", which the candidate
+indexes cover.
 
 **Invariants and conventions**
 
@@ -405,8 +465,13 @@ which these cover.
   queue query fast and to keep the schema self-describing.
 - Queue ordering is `ORDER BY c.score DESC, c.source_ts ASC`, deterministic for equal scores.
 - `reason_code` is validated against `REJECTION_REASONS = (false_alarm, needs_context,
-  too_long, boring, unsafe, other)` and is only meaningful for rejections (the API clears it
-  on approve).
+  too_long, boring, unsafe, bad_edit, bad_captions, other)` and is only meaningful for
+  rejections (the API clears it on approve). The two edit-specific codes exist so a rejected
+  *render* can be distinguished from a rejected *moment*.
+- `renders` is append-only history: every plan or render writes a row with an incrementing
+  `revision`, and at most one row per candidate carries `is_current = 1`. `candidates.edit_status`
+  and `candidates.edited_media_path` are denormalized copies of the current render's outcome,
+  mirroring how `candidates.status` mirrors the review.
 - Dataclasses (`Streamer`, `Stream`, `Candidate`, `Review`, `CandidateView`) are the only
   objects crossing the storage boundary; `CandidateView` joins candidate + review + streamer +
   stream mode so templates never issue queries.
@@ -432,8 +497,13 @@ possible surface — HTML pages, HTML5 video, one form, no JavaScript.
    decision; drops `reason_code` on approvals; calls `db.review_candidate(...)`; and 303
    redirects to `/` so a refresh cannot resubmit.
 4. Both pages display `db.stats()` — pending/approved/rejected counts, approve rate, and the
-   rejection-reason breakdown — so a reviewer can watch the MVP metric move while labelling.
+   rejection-reason breakdown — so a reviewer can watch the approve rate move while labelling.
 5. `GET /api/stats` exposes the same numbers as JSON for scripting.
+6. The candidate page also owns the edit: it plays the current render, prints the framing
+   (strategy, upscale factor, layer list), the caption cues and whatever warnings the render
+   produced, and offers a re-render form (`strategy`, `caption_style`, `caption_emphasis`,
+   `force`), metadata editing and a `final.mp4` download. Re-rendering is synchronous — the
+   request blocks until the encode finishes.
 
 Because labelling happens against the *detected* set, approve rate is a direct precision proxy
 for the detector as configured: `approve_rate = approved / (approved + rejected)`. It is the
@@ -450,11 +520,11 @@ meant to move. Captions are not part of that metric.
   `fieldnames` list (including `caption`, `extract_reason`, `transcript`) and ignores extras,
   so the export schema is stable for downstream analysis.
 - `precision_report` returns `db.stats()` plus `clip_keyword_candidates` — a count of
-  candidates whose signal blob mentions the `clip` keyword. This is the plan's lightweight
+  candidates whose signal blob mentions the `clip` keyword. This is a lightweight
   **weak-label proxy recall check**: if chat screamed `CLIP IT` and no candidate was produced,
   recall is failing even when precision looks fine.
 - `clippy-export` prints the report and writes both files. There is no automated ground-truth
-  comparison by design — human labels *are* the ground truth at this stage.
+  comparison by design — human labels *are* the ground truth.
 
 ---
 
@@ -493,7 +563,7 @@ sequenceDiagram
   `twitch.tv/tags twitch.tv/commands`, answers `PING` with `PONG`, reconnects after 3 s on any
   exception, and strips an optional `oauth:` prefix from the token.
 - **Detection timing:** detection runs **after** the recording window closes, not continuously.
-  This is the deliberate MVP simplification — it removes the need for a rolling segment index
+  This is a deliberate simplification — it removes the need for a rolling segment index
   and a streaming detector, and the same thresholds then apply identically to VODs and live
   captures. The shared `_process_vod_like` path also runs extract-reason + optional caption.
 - **Chat snapshot:** `X_live.chat.json` is written next to the media for reproducibility, so a
@@ -536,7 +606,7 @@ comment in `config.example.yaml` claiming env vars override YAML is inaccurate. 
 | `disk_budget_gb`               | `20.0`                                     | Cap on total bytes under `data/media`               |
 | `ffmpeg_path` / `ffprobe_path` | `ffmpeg` / `ffprobe`                       | Resolved via `shutil.which` or used as a literal path |
 | `twitch_irc_nick` / `twitch_irc_oauth` | `""`                               | Required for live mode                              |
-| `twitch_client_id` / `twitch_client_secret` | `""`                            | Reserved for future Helix/API work; unused in MVP   |
+| `twitch_client_id` / `twitch_client_secret` | `""`                            | Reserved for future Helix/API work; unused by every current path |
 | `openai_api_key`               | `""`                                       | Required to run ASR + caption; skip if unset        |
 | `openai_base_url`              | `https://api.openai.com/v1`                | OpenAI-compatible API root                          |
 | `asr_model`                    | `whisper-1`                                | Transcription model                                 |
@@ -581,12 +651,12 @@ extracts, and disk for `data/media`. SQLite traffic is small and single-writer; 
 
 ### Testing and smoke-checking
 
-- `uv run pytest -q` runs `tests/test_core.py` and `tests/test_caption.py`. Core coverage:
-  chat sample loading, keyword word-boundary matching, cluster merging with peak-timestamp
-  selection, chat+audio score boosting, and the DB create → caption → review → stats → export
-  round trip. Caption coverage: extract-reason wording, chat-window despam, caption HTTP
-  parse, per-run job cap, skip-without-key, and additive column migration. ffmpeg and live
-  network paths are exercised by real runs.
+- `uv run pytest -q` runs the whole suite. It is mostly pure — chat loading and keyword boundaries,
+  cluster merging with peak-timestamp selection, chat+audio score boosting, DB round trips,
+  boundary/dead-air/layout maths, cue building, ASS escaping and emphasis selection — while ffmpeg
+  work runs against the synthetic fixture, face detection runs against frames with and without a
+  face, and the HTTP surface is driven with `TestClient`. Live network paths are exercised by real
+  runs.
 - `python scripts/make_sample_media.py` generates a ~260 s synthetic MP4 with a volume burst
   near `t=120`, roughly aligned with the spike in `samples/chat_sample.json`, so the full VOD
   path can be smoke-tested offline:
@@ -607,12 +677,11 @@ extracts, and disk for `data/media`. SQLite traffic is small and single-writer; 
 | Live detection is post-hoc batch, not streaming                            | Same code path and thresholds as VOD; no segment index needed          | Feed `RollingMediaBuffer.add_segment` per HLS segment and run the detector over a sliding tail |
 | Whole-file PCM decode into memory in `extract_mono_pcm` (~230 MB per hour of audio) | Fine for VOD-length runs on a desktop                          | Stream ffmpeg output in chunks and compute RMS incrementally |
 | `RollingMediaBuffer.prune` is never invoked on the live path                | Detection happens after recording ends                                 | Call `prune` on each new segment once detection becomes continuous |
-| Thresholds are global, not per-channel                                     | Single-stream MVP                                                      | Key `Settings` overrides by streamer login |
+| Thresholds are global, not per-channel                                     | one source is watched at a time                                       | Key `Settings` overrides by streamer login |
 | `GET /candidates/{id}` loads up to 10,000 views and scans in Python         | Review sets are small; simplicity beats indices                        | Add `db.get_candidate_view(id)` reusing the same join |
 | Hard-coded 5 s pairing window and 1 s dedupe gap                            | Stable defaults; avoids config sprawl                                  | Promote both to `Settings` fields |
 | Captions are same-run, top-N, no backfill                                   | Caps API spend; review still works from `extract_reason`               | Optional `clippy-annotate` over existing rows with a remaining budget |
-| Captions are not burned into the MP4                                        | Review UI is the only consumer; avoids a second encode                 | Optional overlay pass after approve |
-| `twitch_client_id` / `twitch_client_secret` are unused                      | MVP cuts clips locally and never calls Helix                           | Use for VOD/chat fetching and the Clip API in the publish phase |
+| `twitch_client_id` / `twitch_client_secret` are unused                      | clips are cut locally and Helix is never called                        | Use for VOD/chat fetching, and the Clip API if publishing is ever added |
 | No learned ranker, no vision                                                | Score is detection confidence; humans judge clippability                | Candidate-only vision enrichment behind a hard calls-per-hour cap |
 
 These seams are all additive. A new signal module only has to return event objects with `ts`,
@@ -642,15 +711,15 @@ Three decisions shape the architecture:
    moments plus a reason-coded label stream, so the approve rate can be measured and the
    thresholds tuned against it.
 
-That is what makes the Phase 1 question — *can we consistently find moments a human would
+That is what makes the central question — *can we consistently find moments a human would
 clip?* — answerable with one number.
 
 ---
 
-# Phase 2 — automated vertical editing
+# Vertical clip editing
 
-Phase 1 answers *which moments*. Phase 2 answers *can those moments be published without a
-human opening an editor* — and what exactly a reviewer still has to check.
+Detection answers *which moments*. The edit pipeline answers *can those moments be published
+without a human opening an editor* — and what exactly a reviewer still has to check first.
 
 ## 17. Stage pipeline
 
@@ -665,17 +734,24 @@ so a run can stop, be inspected, and resumed:
 | --- | --- | --- |
 | `planned` | `plan.json` | bounds chosen, nothing rendered |
 | `extracted` | `base.mp4` | exact source window, cached |
-| `trimmed` | `trimmed.mp4` | dead air removed |
+| `trimmed` | `trimmed.mp4`, `layout.json` | dead air removed, framing resolved |
 | `captioned` | `captions.ass`, `transcript.json` | word timings and cues |
-| `composed` | `layout.json`, `vertical.mp4` | 1080x1920, captions burned in |
+| `composed` | `vertical.mp4`, `compose.inputs.json` | 1080x1920, captions burned in |
 | `complete` | `final.mp4`, `metadata.json`, `thumbnail.jpg` | loudness-normalized and publishable |
 
-Two rules keep the stages composable:
+Three rules keep the stages composable:
 
 1. **Times on the trimmed timeline.** Captions are transcribed from `trimmed.mp4`, so no cue
    ever needs remapping after a cut.
-2. **Every stage caches.** Re-running reuses artifacts and re-renders only what changed;
-   `--force` discards everything for that candidate.
+2. **Every stage caches, and the composed stage checks its inputs.** A stage with an existing
+   artifact is reused without `--force`, but composition can tell whether the artifact it finds
+   still matches the pixels, the caption text, the framing and the encode settings that are now
+   on offer (`compose.inputs.json`), and the loudness pass refuses a `final.mp4` older than the
+   `vertical.mp4` it came from. `--force` discards everything for that candidate.
+3. **Framing is resolved before captions.** Reading the frame is what tells the caption stage
+   whether the band has to move, so the layout (and `layout.json`) is planned immediately after
+   the dead-air cut rather than at the end of composition. It is resolved once and handed to the
+   composition stage, so the frame sampling is never paid for twice.
 
 ## 18. Decisions and why
 
@@ -717,17 +793,298 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 | --- | --- | --- |
 | No speech veto in dead air | the guard band, minimum gap and payoff protection already keep cuts off the main moment | one ASR pass on `base.mp4` plus a time remap through the keep segments |
 | `conversation` splits the frame in half | a wrongly-guessed speaker is worse than a static split | per-region motion or diarization |
-| Vertical position is not tracked | without face detection it chases noise | a face/person detector |
 | Interpolated word timings when a server has none | cues stay in sync at segment granularity; only karaoke precision suffers | a server that returns word timings |
 | Review re-render is synchronous | one clip takes seconds, and a reviewer expects to wait | a job queue |
+| Vertical framing is inert on a 16:9 capture | a 9:16 crop of a 16:9 frame already uses the whole height, so there is no headroom to move within: the tracked vertical position changes framing only for sources taller than 9:16, though it always informs the caption band | a taller source, or a crop that zooms in far enough to create headroom |
+| Face detection is frontal-only and opt-in | `layout_track_backend: opencv` uses the cascade bundled with the wheel, so it needs no model download and never runs unless asked; it misses profile faces and can be fooled by face-like patterns, which is why a clip below `face_min_hit_ratio` falls back to motion instead | a DNN detector (OpenCV 5's `FaceDetectorYN` with a downloaded model, or mediapipe) behind the same seam, which would also remove the opt-in |
 
 ## 20. Testing
 
-The suite is fast and mostly pure: boundary, dead-air, layout, cue and metadata maths are tested
-as functions, ffmpeg is exercised through the synthetic `samples/sample_vod.mp4` fixture, and the
-API is driven with `TestClient`. Two behaviours are covered end-to-end because they are the ones
-that broke in practice: the pipeline integration test renders a real 1080x1920 clip with burned
-captions and normalized audio, and the ffmpeg filter strings are asserted against the actual
-escaping rules (a Windows drive colon in `fontsdir` needs a *double* backslash — verified against
-ffmpeg 9.0.2, not assumed).
+The suite is fast and mostly pure: boundary, dead-air, layout, cue, emphasis and metadata maths are
+tested as functions, ffmpeg is exercised through the synthetic `samples/sample_vod.mp4` fixture, face
+detection runs on frames with and without a face, and the API is driven with `TestClient`. The
+behaviours that are covered end-to-end are the ones that broke in practice: the pipeline integration
+tests render real 1080x1920 clips with burned captions and normalized audio (including a caption
+change that has to re-encode the deliverable and leave the cache alone when nothing changed), and the
+ffmpeg filter strings are asserted against the actual escaping rules (a Windows drive colon in
+`fontsdir` needs a *double* backslash — verified against ffmpeg 9.0.2, not assumed).
+
+## 21. Editing settings: layout, captions and emphasis
+
+`clippy-edit` exposes a small set of reviewer-facing choices. This section is the reference for
+what each value actually does, because the answer is spread across `edit/layouts.py`,
+`caption/styles.py`, `caption/align.py` and `caption/emphasis.py` rather than documented per
+option anywhere else.
+
+The settings travel in three hops, and knowing the middle hop explains most surprises:
+
+```text
+config.yaml / Settings  →  CLI flags (--strategy, --caption-style, --caption-emphasis)
+                            or the UI re-render form  →  EditOverrides
+                                                       → build_plan folds them into plan.json
+                                                       → the stage reads the PLAN, not Settings
+```
+
+`build_plan` resolves `override or settings` once, so `plan.json` is the record of what was
+requested, and the caption stage reads `plan.captions.style` and `plan.captions.emphasis` rather
+than `Settings`, which is what makes a CLI or UI override take effect on a re-render. Values with
+no override path (`caption_safe_area`, the cue rules, fonts and colours) are read from `Settings`
+directly. Anything a reviewer sees is therefore in `plan.json`: `layout.strategy` (requested) vs
+`layout.resolved_strategy` (chosen), `captions.style`, `captions.emphasis`,
+`captions.emphasis_source`, `captions.anchor`, `captions.emphasis_words` and `captions.cue_count`.
+
+### 21.1 Layout strategies (`layout_strategy`)
+
+The deliverable is 1080x1920 (`clip_target_width` x `clip_target_height`) at `clip_fps`
+(`0` follows the source). Filling a 9:16 canvas from a 16:9 source always needs a decision,
+and that is what the strategy picks:
+
+| strategy | what it does | requirement | layers in `layout.json` |
+| --- | --- | --- | --- |
+| `fit_blur` | the whole frame scaled to fit width, with a blurred, cropped copy of the same frame filling the rest | none; the honest answer for low-resolution footage | blurred background + fitted video |
+| `irl` | a tracked `source_h x 9/16` crop, subject held near centre, pan smoothed, zoom clamped | needs `min(width, height) >= 720` (`MIN_TRACKED_SOURCE_HEIGHT`) | one crop layer per tracked span |
+| `gaming` | gameplay crop on top with the facecam in the panel below (gameplay occupies `0,0,1080,1152`, i.e. the top 60%) | a `facecam_box`, or the persistent-corner heuristic | gameplay + facecam layers |
+| `conversation` | splits the frame into two panels instead of tracking who is speaking | two stable motion regions | two panel layers |
+| `auto` | chooses from evidence, then never resolves at plan time | - | whatever it chose |
+
+`auto` is resolved during composition by `resolve_strategy()`, in this order:
+
+1. a configured `facecam_box` → `gaming`
+2. otherwise `min(source_width, source_height) >= 720` → `irl`
+3. otherwise `fit_blur`
+
+then these downgrades and warnings apply, all recorded on the plan rather than applied silently:
+
+| condition | result | warning code |
+| --- | --- | --- |
+| `irl` or `conversation` with `source_height < 720` | forced to `fit_blur` | `low_resolution_layout` |
+| `gaming` with no facecam box | forced to `fit_blur` | `facecam_box_missing` |
+| `irl` or `conversation` with `layout_track_backend: none` | strategy kept, but nothing tracks | `tracking_unavailable` |
+| resolved `upscale_factor > quality_warn_upscale` (2.0) | strategy kept, warning added | `upscale_exceeds_threshold` |
+
+Before composition has run, `layout.resolved_strategy` is empty and the plan carries
+`layout_pending`, which is what tells a reviewer "this plan has not been rendered yet". The
+upscale warning is not a defect: even a 1080p16:9 source is a ~1.8x upscale to fill 1080x1920
+natively, handled with lanczos plus a mild `unsharp`; only 1440p/4K capture makes it near-native.
+
+Supporting knobs, all of which only matter once a crop strategy is chosen:
+
+| key | default | effect |
+| --- | --- | --- |
+| `layout_track_backend` | `motion` | `none` disables tracking (and warns), which also leaves the caption band where it is because there is no evidence; `motion` uses a numpy motion map; `opencv` uses the bundled Haar face cascade for both a subject box and a vertical position (see below); `mediapipe` is accepted but not implemented and falls back to motion |
+| `layout_smoothing` | `0.12` | crop-pan responsiveness; `1.0` is unsmoothed and visibly twitchy |
+| `facecam_box` | `""` | `"x,y,w,h"`; fractions when the values are `<= 1`, else pixels |
+| `layout_zoom` | `1.0` | zoom clamp on the tracked crop |
+| `crop_bias` | `0.0` | manual nudge for a mis-framed crop; override-only, so there is no config key - set it through `EditOverrides` |
+
+Two internal constants shape the look and are not configurable: a crop only moves when the
+subject moves beyond `TRACK_DEADBAND` (0.02), and one clip is capped at `MAX_TRACK_SEGMENTS`
+(24) spans so the filter graph stays small. That deadband is why a tracked crop looks calm
+instead of continuously drifting.
+
+The same decode also yields a **vertical** motion centroid and, with
+`layout_track_backend: opencv`, a **face box** per sampled frame.
+
+**The motion backend (default)** reports a centroid and no box. Its vertical centroid is not used
+to position the crop - without detection, a vertical crop would chase noise - but it is part of the
+evidence behind `caption_safe_area: auto` (§21.4), which only needs to know which slice of the
+canvas the motion occupies across the whole clip.
+
+**The face backend** (`layout_track_backend: opencv`, in `edit/faces.py`) follows the largest face and reports a real
+box, which feeds two things: the vertical crop position and the caption band test. It is
+deliberately gated rather than trusted: detection runs on small grayscale frames
+(`face_detection_width`), ignores anything smaller than `face_min_size_ratio` of the frame, prefers
+the previously-followed face when two are a similar size, and is discarded entirely unless the face
+was seen in at least `face_min_hit_ratio` of sampled frames - at which point the clip falls back to
+motion. Frames without a detection carry the previous position forward, so the track stays dense and
+the layout stays calm. OpenCV is imported lazily, so nothing else in the package needs it, and a
+detector failure is logged and degraded rather than fatal.
+
+| key | default | effect |
+| --- | --- | --- |
+| `face_detection_width` | `480` | width of the grayscale frames the cascade sees: a speed/accuracy tradeoff |
+| `face_min_size_ratio` | `0.06` | smallest face worth believing, as a fraction of the frame |
+| `face_min_hit_ratio` | `0.2` | below this share of sampled frames the whole track is rejected and motion takes over |
+
+### 21.2 Caption styles (`caption_style`)
+
+`caption_style` picks a preset from `caption/styles.py` (`_PRESETS`), and `Settings` then
+overrides individual attributes on top of it. These numbers *are* the definition of each style:
+
+| preset | size | bold | case | karaoke | outline / shadow | `pop_scale` | look |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `karaoke_highlight` | 54 | yes | UPPER | yes | 4 / 2 | 0 | words light up one at a time as they are spoken; emphasised words go bold |
+| `block_pop` | 60 | yes | UPPER | no | 5 / 3 | 108 | whole cue appears at once; emphasised words pop to 108% and change colour |
+| `minimal` | 44 | no | mixed | no | 3 / 1 | 0 | plain subtitle look, no highlighting theatre |
+
+Karaoke versus plain is two different code paths in `caption/ass.py`, and the difference is
+larger than it sounds:
+
+- **Karaoke (`karaoke_text`)** writes a `\k` duration per word and *swaps* the style colours, so
+  `caption_highlight_color` becomes `PrimaryColour` and `caption_primary_color` becomes
+  `SecondaryColour`. libass flips between them at each `\k` boundary, which is what makes words
+  light up on the spoken beat without one Dialogue event per word.
+- **Plain (`plain_text`)** uses `caption_primary_color` for both slots and recolours only the
+  emphasised words inline (`{\cHIGHLIGHT\b1}word{\cPRIMARY\b<b>}`), leaving the rest of the cue
+  on screen unchanged.
+
+`pop_scale` is applied only to emphasised words, as a `\fscx108\fscy108` prefix, which is why
+`block_pop` is the only preset where emphasis also changes size.
+
+Overridable via `Settings`: `caption_font`, `caption_font_size`, `caption_primary_color`
+(`&H00FFFFFF`), `caption_highlight_color` (`&H0000D7FF` — note ASS is `&HAABBGGRR`), and
+`caption_uppercase`, which is ANDed with the preset, so `caption_uppercase: false` forces mixed
+case for every style. `caption_font_size` defaults to `null`, which means "keep the preset's own
+size" - so the three styles really do differ in size (44 / 54 / 60). Setting it to a number
+forces that one size on every style, which is the escape hatch when a particular streamer's text
+reads too small. An unrecognised `caption_style` silently falls back to `karaoke_highlight`,
+because a stale config value must not fail a render.
+
+Cue grouping is shared by all styles (`caption/align.py`) and bounded by:
+
+| key | default | effect |
+| --- | --- | --- |
+| `caption_max_chars_per_line` | `18` | with `caption_max_lines`, sets the character budget for one cue |
+| `caption_max_lines` | `2` | so the budget is `18 x 2 = 36` characters by default |
+| `caption_max_cue_seconds` | `2.2` | a cue is closed before it outstays its welcome |
+| `caption_min_cue_seconds` | `0.5` | short cues are stretched, to stop flicker |
+| `caption_break_gap_seconds` | `0.35` | a pause this long ends the cue |
+
+A cue also breaks at sentence-ending punctuation (`ends_sentence`). Afterwards `_normalise`
+merges overlapping cues, stretches anything shorter than `caption_min_cue_seconds`, and clamps
+each cue's end to the next cue's start, so the track is monotonic and no two cues can cross.
+
+### 21.3 Word emphasis (`caption_emphasis`)
+
+Emphasis decides which words get highlighted. Both active modes pick from the same cap
+(`DEFAULT_EMPHASIS_LIMIT`, 12 words) and the result is recorded in `captions.emphasis_words`,
+along with `captions.emphasis_source` naming the mode that produced it.
+
+**`heuristic` (default)** — `caption/align.py.pick_emphasis_words`, free and deterministic. Each
+distinct word is scored and the top 12 are kept:
+
+| signal | weight |
+| --- | --- |
+| the word is ALL-CAPS and longer than one character | +3 |
+| the word contains a digit | +2 |
+| the word is a single-word `chat_keywords` hit | +2 |
+| the word is in `DEFAULT_EMOTION_WORDS` (crazy, insane, unreal, clutch, cooked, ...) | +2 |
+| the word is at least `EMPHASIS_MIN_LENGTH` (9) characters long | +1 |
+
+Two consequences are deliberate. Multi-word keywords are excluded from the keyword signal, so
+`clip that` does not light up every occurrence of "that" for the rest of the clip. And the
+ALL-CAPS signal depends on what ASR returned — Whisper tends to return shouting in caps, but
+when it does not, that signal simply never fires and the other weights carry the decision.
+
+**`llm`** — `caption/emphasis.py`. The transcript is sent to the same OpenAI-compatible chat
+endpoint the caption pass uses (`caption_model`, `temperature 0.0`) with a prompt asking for at
+most 12 words, one per line, lowercase, verbatim from the transcript. The answer is then
+validated, and the validation is the point:
+
+1. the reply is split on any non-word character, so bullets, numbering, commas and a sentence of
+   preamble all degrade to plain tokens (and a `1.` list marker becomes `1`, which survives only
+   if the number was actually spoken);
+2. each token is lowercased and stripped of `.,!?"'()[]` — the exact normalisation
+   `caption/ass.py` matches with, so no highlighted word can be one the writer cannot find;
+3. a token is dropped unless it occurs in the transcript as a whole word, so anything invented,
+   misspelled or multi-word never reaches the ASS file;
+4. duplicates collapse and the list is capped at 12.
+
+A hallucinating model can therefore only ever *choose among* words that were really spoken, and
+the worst case is fewer highlights, never a wrong one.
+
+**Fallback.** Any failure — HTTP error, unusable answer, nothing from the transcript — falls back
+to the heuristic set rather than leaving the clip unemphasised, and the plan records both the
+source (`emphasis_source: heuristic_fallback`) and a warning (`emphasis_llm_fallback`) naming the
+reason. Emphasis never fails a render.
+
+**`off`** — no emphasis: no `\k` colour swap activity beyond the karaoke baseline, no recolouring,
+and `emphasis_source: off`.
+
+Because `emphasis_source` distinguishes `heuristic`, `llm`, `heuristic_fallback` and `off`
+(`none` when the caption stage never ran at all, e.g. captions disabled or no API key), a
+reviewer asking "why are these words highlighted?" can answer it from `plan.json` alone.
+
+### 21.4 Caption band (`caption_safe_area`)
+
+`caption_safe_area` chooses where the caption band sits, and it maps onto an ASS alignment:
+
+| value | alignment | behaviour |
+| --- | --- | --- |
+| `auto` | 2 or 8 | bottom band normally; moves to the top band when the frame says the bottom is occupied |
+| `bottom` | 2 | pinned to the bottom band |
+| `middle` | 5 | centred vertically |
+| `top` | 8 | pinned to the top band |
+
+`auto` is the only value that consults the frame, and it can only do that because the pipeline
+resolves the framing *before* the caption stage: `plan_composition` reads the subject track and
+hands `caption_prefer_top` to `generate_captions`. An explicit `bottom`/`middle`/`top` is a
+reviewer decision and therefore ignores that evidence entirely. An unrecognised value falls back
+to `bottom`.
+
+Two independent things can move the band, and both end up as `caption_prefer_top` in
+`layout.json`:
+
+1. **The layout owns the bottom by construction.** `gaming` puts the facecam panel in the bottom
+   40%, so captions at `caption_margin_v` would sit on the streamer's face. No measurement needed.
+2. **The subject track says the bottom is busy** (`caption_avoid_ratio`, default `0.25`). Per
+   sampled frame the subject position is mapped from source space onto the canvas through the layer
+   that carries it. The subject is the **detected face box** when the face backend is on, and
+   otherwise a box of `SUBJECT_BOX_HEIGHT_RATIO` (0.25) of the frame around the motion centroid - a
+   real box makes the test sharper, and its absence keeps the motion path conservative. The frame
+   counts when that box overlaps the caption band. The band moves when the bottom band is covered in
+   *more* than `caption_avoid_ratio` of frames **and** covered at least as often as the top band -
+   otherwise the flip would trade one occluded caption for another.
+
+The caption bands are computed from the same knobs the ASS writer uses
+(`caption_font_size x CAPTION_LINE_HEIGHT x caption_max_lines`, offset by `caption_margin_v`), so
+the decision is made against the strip that will actually be drawn. `layout.caption_bottom_coverage`
+in `layout.json` records the measured fraction, and a `caption_band_moved` warning spells it out
+in the plan.
+
+With the face backend on, the fraction is measured against a real face rectangle; with motion it is
+measured against an assumed one, and it is 0.0 whenever the input is unmeasurable (tracking off, no
+frames, a degenerate band) - which leaves the captions where they were. Vertical *framing* is the
+same evidence applied to the crop, and it only has room to act when the source is taller than 9:16
+(§19).
+
+Measured, not assumed — one frame rendered through the real pipeline with ffmpeg 9.0.2
+(1080x1920, `karaoke_highlight`, `caption_margin_v: 260`), reporting the brightest row of the
+frame:
+
+| `caption_safe_area` | peak row | brightness centroid |
+| --- | --- | --- |
+| `bottom` | 1620 | 1631.9 |
+| `middle` | 947 | 958.9 |
+| `top` | 274 | 285.9 |
+
+The middle band is centred at row ~960 as expected, and `caption_margin_v` does **not** move it:
+changing `caption_margin_v` from 260 to 900 leaves the middle band at the identical row 947,
+because libass only uses the vertical margin to position the bottom and top bands. `margin_v`
+therefore means "distance from the bottom (or top) edge" and has no effect on `middle`.
+
+### 21.5 Where a reviewer changes these
+
+| surface | can change |
+| --- | --- |
+| CLI (`clippy-edit`) | `--strategy`, `--caption-style`, `--caption-emphasis`, `--deadair-mode`, `--no-captions`, `--force`, `--keep-intermediate` |
+| UI re-render form | `strategy`, `caption_style`, `caption_emphasis` and `force` only - `deadair_mode` is CLI/config-only, while `crop_bias`, `zoom`, `target_width` and `target_height` have `EditOverrides` fields but no CLI flag or UI field yet |
+| `config.yaml` / `CLIPPY_*` env | everything else: target size and fps, fonts, colours, cue rules, `caption_safe_area`, track backend, `facecam_box` |
+
+Both interactive surfaces build an `EditOverrides` and `build_plan` folds it into the plan it
+writes, so an override applies to the candidates being (re-)planned in that invocation and the
+result is durable in `plan.json` afterwards.
+
+Re-rendering is cheap on purpose, and worth knowing exactly. Without `--force`: `base.mp4`,
+`trimmed.mp4` and `transcript.json` are reused; `captions.ass` is rebuilt from the cached
+transcript, so no ASR is paid for; and `vertical.mp4` is reused only when its inputs still match
+it, because the trimmed pixels, the caption text, the resolved layout and the encode settings are
+fingerprinted into `compose.inputs.json`. A caption-style change therefore re-encodes and reaches
+the MP4 on its own, while a no-op re-run does not encode at all. `final.mp4` obeys the same
+principle in a simpler form: it is reused only while it is newer than the `vertical.mp4` it came
+from. `--force` skips all of it and rebuilds every stage, including ASR.
+
+
+
+
 
