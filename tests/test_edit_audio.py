@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 from clippy.config import Settings
 from clippy.edit.audio import (
+    _is_fresh,
     _json_blocks,
     build_loudnorm_filter,
     measure_loudness,
@@ -158,3 +160,52 @@ def test_normalize_audio_requires_a_source(tmp_path: Path):
     settings = _settings(tmp_path)
     with pytest.raises(FileNotFoundError):
         normalize_audio(tmp_path / "missing.mp4", tmp_path / "out.mp4", settings=settings)
+
+
+def test_is_fresh_compares_a_cached_deliverable_with_its_input(tmp_path: Path):
+    """A re-encoded clip must not leave a stale deliverable behind."""
+    source = tmp_path / "vertical.mp4"
+    output = tmp_path / "final.mp4"
+    source.write_bytes(b"vertical")
+    output.write_bytes(b"final")
+
+    older = 1_000_000_000
+    newer = older + 60
+    os.utime(source, (older, older))
+    os.utime(output, (newer, newer))
+    assert _is_fresh(output, source) is True
+
+    # The clip was re-encoded after the deliverable was written: the deliverable is stale.
+    os.utime(source, (newer + 60, newer + 60))
+    assert _is_fresh(output, source) is False
+
+    # A missing input can never count as fresh.
+    source.unlink()
+    assert _is_fresh(output, source) is False
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or not FIXTURE.exists(),
+    reason="needs ffmpeg and samples/sample_vod.mp4",
+)
+def test_normalize_audio_rebuilds_a_stale_deliverable(tmp_path: Path):
+    """A newer `vertical.mp4` must invalidate `final.mp4` instead of being silently ignored."""
+    settings = _settings(tmp_path, audio_normalize=False)
+    source = tmp_path / "vertical.mp4"
+    shutil.copy2(FIXTURE, source)
+    output = tmp_path / "final.mp4"
+
+    first = normalize_audio(source, output, settings=settings)
+    assert output.exists()
+    assert first.reason != "reused cached final clip"
+    produced_at = output.stat().st_mtime_ns
+
+    # Touching the clip afterwards is enough to mark the deliverable stale.
+    os.utime(source, None)
+    again = normalize_audio(source, output, settings=settings)
+    assert again.reason != "reused cached final clip"
+    assert output.stat().st_mtime_ns != produced_at
+
+    # With nothing changed since, the deliverable is reused instead of re-encoded.
+    third = normalize_audio(source, output, settings=settings)
+    assert third.reason == "reused cached final clip"

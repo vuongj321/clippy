@@ -7,13 +7,14 @@ and the final encode here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from clippy.audio.intensity import probe_duration_seconds
 from clippy.config import Settings
@@ -26,7 +27,12 @@ from clippy.edit.deadair import (
     segments_for_render,
 )
 from clippy.edit.plan import DeadAirPlan, EditPaths, EditPlan
-from clippy.edit.layouts import BLUR_SIGMA, CompositionPlan, plan_layout
+from clippy.edit.layouts import (
+    BLUR_SIGMA,
+    WARN_CAPTION_BAND,
+    CompositionPlan,
+    plan_layout,
+)
 from clippy.edit.plan import WARN_LAYOUT_PENDING
 from clippy.edit.track import track_subject
 from clippy.extract.ffmpeg_cut import extract_window
@@ -36,6 +42,10 @@ logger = logging.getLogger(__name__)
 WARN_EXTRACT_SHORT = "extract_short"
 WARN_DEADAIR_LENGTH = "deadair_length_mismatch"
 WARN_COMPOSE_LENGTH = "compose_length_mismatch"
+
+# Bump when the fingerprint of what `vertical.mp4` depends on changes shape, so an older
+# sidecar can never be mistaken for a match.
+COMPOSE_INPUTS_VERSION = 1
 
 
 def extract_base(
@@ -400,25 +410,28 @@ def probe_dimensions(path: Path, *, ffprobe_path: str = "ffprobe") -> tuple[int,
     return int(stream.get("width") or 0), int(stream.get("height") or 0)
 
 
-def compose_vertical(
+def _require_trimmed(paths: EditPaths) -> None:
+    if not paths.trimmed.exists():
+        raise FileNotFoundError(f"trimmed clip not found: {paths.trimmed}")
+
+
+def plan_composition(
     plan: EditPlan,
     paths: EditPaths,
     *,
     settings: Settings,
     duration: float,
-    ass_path: Path | None = None,
-    force: bool = False,
 ) -> CompositionPlan:
     """
-    Render ``vertical.mp4``: the vertical canvas, the chosen layout, captions burned in.
+    Resolve the framing and record it, *before* anything burns captions into the frame.
 
-    The layout is planned from the real subject track of the trimmed clip, written to
-    ``layout.json`` and summarised on the plan so a reviewer can see - and later override
-    - the framing that was used. Video is encoded exactly once here; audio passes through
-    untouched, because the loudness pass copies the video stream.
+    Tracking has to decode frames and the layout decides whether the caption band must move,
+    so this runs ahead of the caption stage: `caption_safe_area: auto` can only follow the
+    frame once the frame has been read. Writes ``layout.json`` and mirrors the result onto
+    the plan, so the caption stage and the composition stage read one decision rather than
+    resolving the strategy twice.
     """
-    if not paths.trimmed.exists():
-        raise FileNotFoundError(f"trimmed clip not found: {paths.trimmed}")
+    _require_trimmed(paths)
 
     width, height = probe_dimensions(paths.trimmed, ffprobe_path=settings.ffprobe_path)
     track = track_subject(
@@ -438,9 +451,17 @@ def compose_vertical(
         settings=settings,
         track=track,
         facecam_box=settings.parsed_facecam_box(),
+        # `build_plan` already folded any style override in, so the caption band is measured
+        # against the style that is actually going to be burned in.
+        caption_style=plan.captions.style,
     )
     paths.layout.write_text(json.dumps(layout.to_dict(), indent=2), encoding="utf-8")
+    _record_layout(plan, layout, settings=settings)
+    return layout
 
+
+def _record_layout(plan: EditPlan, layout: CompositionPlan, *, settings: Settings) -> None:
+    """Mirror the resolved layout onto the plan so a reviewer reads one document."""
     plan.layout.strategy = layout.strategy
     plan.layout.resolved_strategy = layout.resolved_strategy
     plan.layout.width = layout.width
@@ -459,11 +480,124 @@ def compose_vertical(
         if warning.code != WARN_LAYOUT_PENDING
     ]
     for code in layout.warnings:
-        plan.add_warning(code, f"layout: {code.replace('_', ' ')}")
+        plan.add_warning(code, _layout_warning_message(code, layout, settings=settings))
 
-    if paths.vertical.exists() and not force:
-        logger.info("Reusing cached %s", paths.vertical)
+
+def _layout_warning_message(code: str, layout: CompositionPlan, *, settings: Settings) -> str:
+    """Turn a layout warning code into the sentence a reviewer can act on."""
+    if code == WARN_CAPTION_BAND:
+        return (
+            "captions moved to the top band: subject motion sits in the bottom band for "
+            f"{layout.caption_bottom_coverage:.0%} of frames (caption_avoid_ratio "
+            f"{settings.caption_avoid_ratio:.0%})"
+        )
+    return f"layout: {code.replace('_', ' ')}"
+
+
+def _text_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _file_stamp(path: Path) -> dict[str, Any] | None:
+    """Cheap identity for a large media file: size plus mtime, not a full hash."""
+    if not path.exists():
+        return None
+    stat = path.stat()
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _composition_inputs(
+    paths: EditPaths,
+    layout: CompositionPlan,
+    *,
+    settings: Settings,
+    ass_path: Path | None,
+) -> dict[str, Any]:
+    """
+    What ``vertical.mp4`` is made of: the pixels, the burned text and the framing.
+
+    `trimmed.mp4` is identified by size and mtime (hashing a 100 MB clip on every run would
+    cost more than it saves), while the two small text inputs are hashed - both are rewritten
+    on every run whether or not anything changed, so their timestamps say nothing.
+    """
+    captions: str | None = None
+    if ass_path is not None and ass_path.exists():
+        captions = _text_digest(ass_path.read_text(encoding="utf-8"))
+    return {
+        "version": COMPOSE_INPUTS_VERSION,
+        "trimmed": _file_stamp(paths.trimmed),
+        "captions": captions,
+        "layout": _text_digest(json.dumps(layout.to_dict(), sort_keys=True)),
+        "encode": {
+            "width": settings.clip_target_width,
+            "height": settings.clip_target_height,
+            "fps": settings.clip_fps or 30,
+            "crf": settings.render_crf,
+            "preset": settings.render_preset,
+        },
+    }
+
+
+def _recorded_inputs(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Ignoring unreadable %s", path)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _cache_is_fresh(
+    paths: EditPaths,
+    layout: CompositionPlan,
+    *,
+    settings: Settings,
+    ass_path: Path | None,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    Is the cached ``vertical.mp4`` still the render these inputs would produce?
+
+    Returns the verdict and the fingerprint computed for this run, so the caller can record it
+    after encoding without recomputing the hashes.
+    """
+    inputs = _composition_inputs(paths, layout, settings=settings, ass_path=ass_path)
+    return _recorded_inputs(paths.compose_inputs) == inputs, inputs
+
+
+def compose_vertical(
+    plan: EditPlan,
+    paths: EditPaths,
+    *,
+    settings: Settings,
+    duration: float,
+    ass_path: Path | None = None,
+    force: bool = False,
+    layout: CompositionPlan | None = None,
+) -> CompositionPlan:
+    """
+    Render ``vertical.mp4``: the vertical canvas, the chosen layout, captions burned in.
+
+    Pass ``layout`` when framing was already resolved (the pipeline resolves it before the
+    caption stage so `caption_safe_area: auto` can follow the frame) to avoid tracking the
+    clip twice; otherwise it is planned and recorded here. Either way ``layout.json`` holds
+    the framing that was used, and video is encoded exactly once - audio passes through
+    untouched, because the loudness pass copies the video stream.
+    """
+    _require_trimmed(paths)
+    if layout is None:
+        layout = plan_composition(plan, paths, settings=settings, duration=duration)
+
+    fresh, inputs = _cache_is_fresh(paths, layout, settings=settings, ass_path=ass_path)
+    if paths.vertical.exists() and not force and fresh:
+        logger.info("Reusing cached %s (inputs unchanged)", paths.vertical)
         return layout
+    if paths.vertical.exists() and not force:
+        logger.info(
+            "Cached %s no longer matches the current inputs; re-rendering",
+            paths.vertical,
+        )
 
     has_video, has_audio = probe_streams(
         paths.trimmed, ffprobe_path=settings.ffprobe_path
@@ -519,6 +653,9 @@ def compose_vertical(
         )
     if not paths.vertical.exists() or paths.vertical.stat().st_size == 0:
         raise RuntimeError(f"ffmpeg produced empty output: {paths.vertical}")
+
+    # Record what this render was made from, so the next run can tell whether it is still valid.
+    paths.compose_inputs.write_text(json.dumps(inputs, indent=2), encoding="utf-8")
 
     actual = probe_duration_seconds(paths.vertical, ffprobe_path=settings.ffprobe_path)
     if abs(actual - duration) > max(1.0, settings.extract_duration_tolerance_seconds * 2):

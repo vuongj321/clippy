@@ -27,7 +27,7 @@ from clippy.edit.plan import (
     MetadataPlan,
     build_plan,
 )
-from clippy.edit.render import apply_deadair, compose_vertical, extract_base
+from clippy.edit.render import apply_deadair, compose_vertical, extract_base, plan_composition
 from clippy.store.db import Candidate, Database, Stream, Streamer
 
 logger = logging.getLogger(__name__)
@@ -224,13 +224,22 @@ def run_edit_pipeline(
                     ),
                     force=force,
                 )
-                caption_result = generate_captions(
-                    plan, paths, settings=settings, force=force
-                )
-                caption_result.commit(plan)
                 trimmed_duration = probe_duration_seconds(
                     paths.trimmed, ffprobe_path=settings.ffprobe_path
                 )
+                # Resolve the framing before the captions: `caption_safe_area: auto` can only
+                # move the caption band away from the subject once the frame has been read.
+                composition = plan_composition(
+                    plan, paths, settings=settings, duration=trimmed_duration
+                )
+                caption_result = generate_captions(
+                    plan,
+                    paths,
+                    settings=settings,
+                    force=force,
+                    prefer_top=composition.caption_prefer_top,
+                )
+                caption_result.commit(plan)
                 compose_vertical(
                     plan,
                     paths,
@@ -238,6 +247,7 @@ def run_edit_pipeline(
                     duration=trimmed_duration,
                     ass_path=caption_result.captions_path,
                     force=force,
+                    layout=composition,
                 )
                 plan.set_stage("composed")
                 plan.save(paths.plan)

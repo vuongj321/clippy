@@ -150,6 +150,19 @@ def measure_loudness(source: Path, *, settings: Settings) -> dict[str, float]:
     return parse_loudnorm_output(proc.stderr.decode("utf-8", errors="replace"))
 
 
+def _is_fresh(output: Path, source: Path) -> bool:
+    """
+    Is a cached deliverable still newer than the clip it was made from?
+
+    A plain "does it exist" check cannot see that `vertical.mp4` was re-encoded, which would
+    leave `final.mp4` holding the previous picture with the new one already on disk.
+    """
+    try:
+        return output.stat().st_mtime_ns >= source.stat().st_mtime_ns
+    except OSError:
+        return False
+
+
 def normalize_audio(
     source: Path,
     output: Path,
@@ -166,8 +179,10 @@ def normalize_audio(
     if not source.exists():
         raise FileNotFoundError(f"source clip not found: {source}")
     if output.exists() and not force:
-        logger.info("Reusing cached %s", output)
-        return AudioResult(applied=True, reason="reused cached final clip")
+        if _is_fresh(output, source):
+            logger.info("Reusing cached %s", output)
+            return AudioResult(applied=True, reason="reused cached final clip")
+        logger.info("Cached %s predates %s; normalizing again", output, source.name)
 
     ffmpeg = _require_ffmpeg(settings.ffmpeg_path)
     measured: dict[str, float] = {}

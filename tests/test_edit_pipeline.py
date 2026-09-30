@@ -397,11 +397,105 @@ def test_render_path_produces_captions_end_to_end(monkeypatch, tmp_path: Path):
     assert plan.layout.resolved_strategy != "auto"
     # Composition resolves the strategy, so the pre-composition warning must be gone.
     assert WARN_LAYOUT_PENDING not in plan.warning_codes()
+    # 640x360 cannot support a tracked crop, so framing is fit_blur and the band stays low.
+    assert plan.layout.resolved_strategy == "fit_blur"
+    assert plan.captions.anchor == "bottom"
     assert plan.audio.applied is True
 
     reloaded = db.get_candidate(candidate.id)
     assert reloaded is not None
     assert reloaded.edit_status == "rendered"
     assert reloaded.edited_media_path == str(paths.final)
+
+    # A re-run with identical inputs must reuse the composed video rather than re-encode it.
+    composed_at = paths.vertical.stat().st_mtime_ns
+    final_at = paths.final.stat().st_mtime_ns
+    again = run_edit_pipeline(settings=settings, candidate_ids=[candidate.id], dry_run=False)
+    assert again["failed"] == 0
+    assert paths.vertical.stat().st_mtime_ns == composed_at
+    assert paths.final.stat().st_mtime_ns == final_at
+
+    # Changing only the caption style makes the cached render stale, so the new style reaches
+    # the deliverable without `--force` - and therefore without paying for ASR again.
+    restyled = run_edit_pipeline(
+        settings=settings,
+        candidate_ids=[candidate.id],
+        dry_run=False,
+        overrides=EditOverrides(caption_style="block_pop"),
+    )
+    assert restyled["failed"] == 0
+    assert paths.vertical.stat().st_mtime_ns != composed_at
+    assert paths.final.stat().st_mtime_ns != final_at
+
+    restyled_plan = EditPlan.load(paths.plan)
+    assert restyled_plan.captions.style == "block_pop"
+    style_line = next(
+        line
+        for line in paths.captions.read_text(encoding="utf-8").splitlines()
+        if line.startswith("Style: Caption")
+    )
+    assert style_line.split(",")[2] == "60"  # block_pop's font size, not karaoke_highlight's 54
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or not FIXTURE.exists(),
+    reason="needs ffmpeg and samples/sample_vod.mp4",
+)
+def test_auto_captions_follow_the_resolved_framing(monkeypatch, tmp_path: Path):
+    """
+    `caption_safe_area: auto` reads the frame, so framing is resolved before captions.
+
+    A facecam box makes `auto` resolve to `gaming`, whose panel owns the bottom of the
+    canvas - so the caption band has to move up instead of sitting on the face.
+    """
+    settings = _settings(tmp_path, facecam_box="0.7,0.6,0.3,0.4")
+    db = Database(settings.resolved_db_path())
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(
+        streamer.id, "vod", media_path=str(FIXTURE), source_width=640, source_height=360
+    )
+    candidate = db.create_candidate(
+        stream.id,
+        source_ts=120.0,
+        pre_context_seconds=30.0,
+        post_context_seconds=30.0,
+        signals={"kind": "keyword"},
+        score=0.9,
+    )
+    transcript = TranscriptPayload(
+        text="clip this",
+        language="en",
+        duration=2.0,
+        segments=[
+            TranscriptSegment(
+                start=0.0,
+                end=2.0,
+                text="clip this",
+                words=[TranscriptWord(0.0, 0.5, "CLIP"), TranscriptWord(0.6, 1.0, "this")],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "clippy.edit.captions.transcribe_words", lambda *a, **k: transcript
+    )
+
+    result = run_edit_pipeline(
+        settings=settings, candidate_ids=[candidate.id], dry_run=False
+    )
+
+    assert result["failed"] == 0
+    paths = EditPaths.for_candidate(settings, candidate.id)
+    plan = EditPlan.load(paths.plan)
+    assert settings.caption_safe_area == "auto"
+    assert plan.layout.resolved_strategy == "gaming"
+    assert plan.captions.anchor == "top"
+
+    # The burned track really is the top band (ASS alignment 8), not just a plan field.
+    style_line = next(
+        line
+        for line in paths.captions.read_text(encoding="utf-8").splitlines()
+        if line.startswith("Style: Caption")
+    )
+    assert style_line.split(",")[18] == "8"
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import replace
@@ -13,8 +14,11 @@ from clippy.edit.layouts import plan_layout
 from clippy.edit.plan import EditPlan, EditPaths, build_plan
 from clippy.edit.render import (
     WARN_EXTRACT_SHORT,
+    _cache_is_fresh,
+    _composition_inputs,
     apply_deadair,
     build_composition_filter,
+    compose_vertical,
     escape_filter_path,
     extract_base,
 )
@@ -129,6 +133,112 @@ def test_escape_filter_path_double_escapes_the_drive_colon():
     assert escape_filter_path("C:/Windows/Fonts") == r"C\\:/Windows/Fonts"
     assert escape_filter_path(r"C:\Windows\Fonts") == r"C\\:/Windows/Fonts"
     assert escape_filter_path("captions.ass") == "captions.ass"
+
+
+def test_compose_vertical_reuses_the_cache_only_when_inputs_match(
+    monkeypatch, tmp_path: Path
+):
+    """
+    Framing is resolved once, and a cached render is reused only while its inputs still match.
+
+    A pre-existing ``vertical.mp4`` plus a matching fingerprint returns the cached render without
+    touching ffmpeg, which keeps this a pure orchestration test.
+    """
+    settings, plan, paths = _plan(tmp_path, ts=120.0)
+    paths.ensure_root()
+    paths.trimmed.write_bytes(b"trimmed")
+    paths.vertical.write_bytes(b"cached")
+    paths.captions.write_text("[captions v1]", encoding="utf-8")
+
+    layout = plan_layout(
+        requested="auto",
+        source_width=1920,
+        source_height=1080,
+        width=1080,
+        height=1920,
+        fps=30,
+        duration=10.0,
+        settings=settings,
+        facecam_box=(0.7, 0.6, 0.3, 0.4),
+    )
+    # The facecam panel owns the bottom of the frame; that is what moves the captions.
+    assert layout.caption_prefer_top is True
+
+    fresh, inputs = _cache_is_fresh(
+        paths, layout, settings=settings, ass_path=paths.captions
+    )
+    assert fresh is False  # nothing recorded yet, so the render cannot be trusted
+    paths.compose_inputs.write_text(json.dumps(inputs), encoding="utf-8")
+    fresh, _ = _cache_is_fresh(paths, layout, settings=settings, ass_path=paths.captions)
+    assert fresh is True
+
+    def never(*args, **kwargs):
+        raise AssertionError("composition must not re-resolve the framing it was given")
+
+    monkeypatch.setattr("clippy.edit.render.plan_composition", never)
+    result = compose_vertical(
+        plan,
+        paths,
+        settings=settings,
+        duration=10.0,
+        layout=layout,
+        ass_path=paths.captions,
+    )
+
+    assert result is layout
+
+
+def test_composition_fingerprint_notices_every_input(tmp_path: Path):
+    """A cached render is only valid while the pixels, the text and the framing are unchanged."""
+    settings, _plan_obj, paths = _plan(tmp_path, ts=120.0)
+    paths.ensure_root()
+    paths.trimmed.write_bytes(b"trimmed")
+    paths.captions.write_text("[v1]", encoding="utf-8")
+
+    layout = plan_layout(
+        requested="fit_blur",
+        source_width=1920,
+        source_height=1080,
+        width=1080,
+        height=1920,
+        fps=30,
+        duration=5.0,
+        settings=settings,
+    )
+    first = _composition_inputs(paths, layout, settings=settings, ass_path=paths.captions)
+    assert _composition_inputs(paths, layout, settings=settings, ass_path=paths.captions) == first
+
+    # Rewriting the same caption text is not a change: both files are rewritten every run, so
+    # the fingerprint compares content rather than timestamps.
+    paths.captions.write_text("[v1]", encoding="utf-8")
+    assert _composition_inputs(paths, layout, settings=settings, ass_path=paths.captions) == first
+
+    paths.captions.write_text("[v2]", encoding="utf-8")
+    assert _composition_inputs(paths, layout, settings=settings, ass_path=paths.captions) != first
+    paths.captions.write_text("[v1]", encoding="utf-8")
+
+    # No captions burned at all is a different render.
+    assert _composition_inputs(paths, layout, settings=settings, ass_path=None) != first
+
+    # Different framing, different pixels, different encode settings.
+    other_layout = plan_layout(
+        requested="irl",
+        source_width=1920,
+        source_height=1080,
+        width=1080,
+        height=1920,
+        fps=30,
+        duration=5.0,
+        settings=settings,
+    )
+    assert (
+        _composition_inputs(paths, other_layout, settings=settings, ass_path=paths.captions)
+        != first
+    )
+    paths.trimmed.write_bytes(b"trimmed again")
+    assert _composition_inputs(paths, layout, settings=settings, ass_path=paths.captions) != first
+    louder = _settings(tmp_path, render_crf=18)
+    assert _composition_inputs(paths, layout, settings=louder, ass_path=paths.captions) != first
 
 
 def test_build_composition_filter_composes_and_burns_captions(tmp_path: Path):
