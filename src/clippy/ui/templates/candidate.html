@@ -48,7 +48,7 @@
 </p>
 
 {% if view.candidate.media_path %}
-  <video class="detail-video" controls autoplay src="/media/{{ view.candidate.id }}"></video>
+  <video class="detail-video" controls src="/media/{{ view.candidate.id }}"></video>
 {% else %}
   <p class="muted">No media extracted for this candidate.</p>
 {% endif %}
