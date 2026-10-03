@@ -480,31 +480,43 @@ def test_parsed_facecam_box_treats_auto_as_no_explicit_box(tmp_path: Path):
     assert _settings(tmp_path, facecam_box="").parsed_facecam_box() is None
 
 
-def test_facecam_box_from_track_grows_the_face_and_snaps_to_its_corner():
+def test_facecam_box_from_track_centres_a_minimum_size_tile_on_the_face():
     box = facecam_box_from_track(_face_track(), source_width=1920, source_height=1080)
 
     assert box is not None
     x, y, w, h = box
-    # Median face is 0.12 x 0.16, grown by the default 1.6x pad.
-    assert w == pytest.approx(0.192)
-    assert h == pytest.approx(0.256)
-    # The face sits in the top-right, so the box is flush to that corner.
-    assert x == pytest.approx(1.0 - w)
-    assert y == pytest.approx(0.0)
+    # The face (0.12 x 0.16) is narrower than the minimum tile, so the tile is widened to 22% of
+    # the source, and is square in pixels when no panel aspect is given.
+    assert w == pytest.approx(0.22)
+    assert h == pytest.approx(0.22 * 1920 / 1080)
+    # It is centred on the face and never snapped to an edge.
+    assert x + w / 2.0 == pytest.approx(0.75)
+    assert y + h / 2.0 == pytest.approx(0.2)
 
 
-def test_facecam_box_from_track_snaps_each_axis_only_when_the_face_is_off_centre():
-    """A face near the midline keeps that axis' median instead of being dragged to an edge."""
+def test_facecam_box_from_track_shapes_the_tile_to_the_panel_aspect():
+    aspect = 1080 / 760  # the gaming panel's source aspect
     box = facecam_box_from_track(
-        _face_track(centre=(0.48, 0.2)), source_width=1920, source_height=1080
+        _face_track(), source_width=1920, source_height=1080, aspect=aspect
     )
 
     assert box is not None
     x, y, w, h = box
-    # x is only 0.02 from the midline, so it stays centred on the face...
-    assert x + w / 2.0 == pytest.approx(0.48)
-    # ...while y is clearly high in the frame, so it snaps to the top edge.
-    assert y == pytest.approx(0.0)
+    assert (w * 1920) / (h * 1080) == pytest.approx(aspect)
+    assert x + w / 2.0 == pytest.approx(0.75)
+    assert y + h / 2.0 == pytest.approx(0.2)
+
+
+def test_facecam_box_from_track_grows_a_large_face_beyond_the_minimum():
+    box = facecam_box_from_track(
+        _face_track(centre=(0.4, 0.5), size=(0.3, 0.3)),
+        source_width=1920,
+        source_height=1080,
+    )
+
+    assert box is not None
+    # 0.3 x 1.6 = 0.48 of the source width, wider than the 0.22 minimum.
+    assert box[2] == pytest.approx(0.48)
 
 
 def test_facecam_box_from_track_uses_the_median_not_a_stray():
@@ -513,9 +525,10 @@ def test_facecam_box_from_track_uses_the_median_not_a_stray():
 
     box = facecam_box_from_track(track, source_width=1920, source_height=1080)
 
-    # Four of five frames are top-right, so one stray detection cannot drag the box left.
+    # Four of five frames sit at (0.75, 0.2), so one stray detection cannot drag the tile.
     assert box is not None
-    assert box[0] == pytest.approx(1.0 - box[2])
+    assert box[0] + box[2] / 2.0 == pytest.approx(0.75)
+    assert box[1] + box[3] / 2.0 == pytest.approx(0.2)
 
 
 def test_facecam_box_from_track_keeps_the_median_when_the_face_is_centred():
@@ -525,7 +538,6 @@ def test_facecam_box_from_track_keeps_the_median_when_the_face_is_centred():
 
     assert box is not None
     x, y, w, h = box
-    # No corner majority, so the box stays centred on the face rather than being snapped away.
     assert x + w / 2.0 == pytest.approx(0.5)
     assert y + h / 2.0 == pytest.approx(0.5)
 

@@ -85,7 +85,7 @@ quality_warn_upscale: 2.0
 # <= 1, else pixels), or "auto" to derive the box from the tracked face. `auto` needs
 # `layout_track_backend: opencv`; without a usable face it warns and falls back to fit_blur.
 facecam_box: ""               # "" | "x,y,w,h" | "auto"
-facecam_pad: 1.6              # headroom grown around the detected face (auto only)
+facecam_pad: 1.6              # headroom grown around the detected face before it becomes a tile (auto only)
 # Face backend only (`layout_track_backend: opencv`)
 # face_detection_width: 480    # width of the grayscale frames the cascade sees
 # face_min_size_ratio: 0.06    # smallest face worth believing, as a fraction of the frame

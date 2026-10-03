@@ -34,6 +34,7 @@ from clippy.edit.layouts import (
     WARN_FACECAM_DERIVED,
     CompositionPlan,
     facecam_box_from_track,
+    gaming_panel_aspect,
     plan_layout,
 )
 from clippy.edit.plan import WARN_LAYOUT_PENDING
@@ -452,6 +453,8 @@ def plan_composition(
     # box is derived from the clip's own tracked face, then falls through the exact same
     # `facecam_box` path as a typed one. A failure to derive leaves the box `None`, which the layout
     # reports as `facecam_box_auto_failed` and settles on `fit_blur`.
+    canvas_width = plan.layout.width or settings.clip_target_width
+    canvas_height = plan.layout.height or settings.clip_target_height
     facecam_box = plan.layout.facecam_box or settings.parsed_facecam_box()
     facecam_box_auto = False
     if facecam_box is None and settings.facecam_box_is_auto():
@@ -461,13 +464,15 @@ def plan_composition(
             source_width=width,
             source_height=height,
             pad=settings.facecam_pad,
+            # Shape the tile to the panel it will fill, so `_crop_inside` does not re-crop it.
+            aspect=gaming_panel_aspect(canvas_width, canvas_height),
         )
     layout = plan_layout(
         requested=plan.layout.strategy or settings.layout_strategy,
         source_width=width,
         source_height=height,
-        width=plan.layout.width or settings.clip_target_width,
-        height=plan.layout.height or settings.clip_target_height,
+        width=canvas_width,
+        height=canvas_height,
         fps=plan.layout.fps or (settings.clip_fps or 30),
         duration=duration,
         settings=settings,

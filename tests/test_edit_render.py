@@ -495,9 +495,13 @@ def test_plan_composition_derives_a_facecam_box_when_asked(monkeypatch, tmp_path
     assert layout.facecam_box_source == "auto"
     assert layout.facecam_box is not None
     assert WARN_FACECAM_DERIVED in layout.warnings
-    # Median face 0.12x0.16 grown by 1.6x, snapped to the top-right corner.
-    assert plan.layout.facecam_box == pytest.approx([0.808, 0.0, 0.192, 0.256])
+    # A 22%-wide tile shaped to the gaming panel (1080:760) and centred on the face at (0.75, 0.2).
+    assert plan.layout.facecam_box == pytest.approx([0.64, 0.0624, 0.22, 0.2752], abs=1e-3)
     assert plan.layout.facecam_box_source == "auto"
+    # The whole point: the derived box must actually contain the face.
+    x, y, w, h = plan.layout.facecam_box
+    assert x <= 0.75 <= x + w
+    assert y <= 0.2 <= y + h
 
 
 def test_plan_composition_warns_when_auto_finds_no_face(monkeypatch, tmp_path: Path):

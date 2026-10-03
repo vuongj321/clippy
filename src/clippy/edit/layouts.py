@@ -52,20 +52,18 @@ WARN_FACECAM_AUTO_FAILED = "facecam_box_auto_failed"
 MIN_TRACKED_SOURCE_HEIGHT = 720
 BLUR_SIGMA = 24
 PANEL_GAP = 8
+GAMEPLAY_RATIO = 0.6
 TRACK_DEADBAND = 0.02
 MAX_TRACK_SEGMENTS = 24
 
-# Auto facecam derivation, fed by the `opencv` face track's real boxes. A webcam panel needs
-# headroom around the face, so the detected face is grown by `FACECAM_PAD`; the box is the median
-# of the tracked boxes so one stray detection cannot drag it; and a face that sits off-centre
-# toward an edge is snapped flush to that edge so the source crop is stable.
+# Auto facecam derivation, fed by the `opencv` face track's real boxes. The detected box is only
+# the *face*, so it is grown by `FACECAM_PAD` for headroom and then widened to a minimum
+# `FACECAM_MIN_WIDTH` of the source - a webcam panel should show a tile, not a close-up of one
+# cheek. The derived region is centred on the face (never snapped to an edge, which would move the
+# crop off the face) and shaped to the panel's aspect so `_crop_inside` is effectively a no-op.
 FACECAM_PAD = 1.6
 FACECAM_MIN_FACE_HITS = 4
-FACECAM_CORNER_MAJORITY = 0.6
-# How far past the midline the face's median centre must sit before an axis is snapped to an edge.
-# A face that is merely *near* the middle is not cornered, and snapping it would drag the panel
-# away from the face entirely.
-FACECAM_CORNER_OFFSET = 0.12
+FACECAM_MIN_WIDTH = 0.22
 
 # Caption-band geometry, used only to decide whether a caption would land on the subject.
 # ASS default line spacing is close enough for a strip this size, and the subject is modelled
@@ -649,89 +647,54 @@ def _median(values: Sequence[float]) -> float:
     return (ordered[middle - 1] + ordered[middle]) / 2.0
 
 
-def _corner_sides(
-    faces: Sequence[TrackPoint],
-    *,
-    majority: float,
-    min_offset: float = FACECAM_CORNER_OFFSET,
-) -> tuple[bool | None, bool | None]:
-    """
-    Which edge the face occupies on each axis: ``(left?, top?)``, `None` meaning "keep the median".
-
-    An axis is only snapped when the face's **median** centre clears `min_offset` from the midline
-    and a clear majority (`majority`) of frames sit on one side of it. A face near the middle is not
-    cornered however the individual frames split, and snapping it would drag the panel off the face.
-    The axes are decided independently, so a webcam in the top-centre keeps its horizontal position
-    while snapping to the top edge.
-    """
-    total = len(faces)
-    if total == 0:
-        return None, None
-
-    horizontal: bool | None = None
-    if abs(_median([point.x for point in faces]) - 0.5) >= min_offset:
-        left = sum(1 for point in faces if point.x < 0.5)
-        right = sum(1 for point in faces if point.x > 0.5)
-        if left / total >= majority:
-            horizontal = True
-        elif right / total >= majority:
-            horizontal = False
-
-    vertical: bool | None = None
-    if abs(_median([point.y for point in faces]) - 0.5) >= min_offset:
-        top = sum(1 for point in faces if point.y < 0.5)
-        bottom = sum(1 for point in faces if point.y > 0.5)
-        if top / total >= majority:
-            vertical = True
-        elif bottom / total >= majority:
-            vertical = False
-
-    return horizontal, vertical
-
-
 def facecam_box_from_track(
     track: Sequence[TrackPoint],
     *,
     source_width: float,
     source_height: float,
     pad: float = FACECAM_PAD,
+    min_width: float = FACECAM_MIN_WIDTH,
     min_hits: int = FACECAM_MIN_FACE_HITS,
-    corner_majority: float = FACECAM_CORNER_MAJORITY,
+    aspect: float | None = None,
 ) -> tuple[float, float, float, float] | None:
     """
-    Derive a facecam box from a tracked face, as fractions of the frame (or `None`).
+    Derive a webcam tile from a tracked face, as fractions of the frame (or `None`).
 
     Only the `opencv` face backend reports a real box (`TrackPoint.width/height > 0`); a motion
     track carries no size and yields `None`, which is what keeps `facecam_box: auto` honest when
-    there is nothing to derive from. The box is the **median** of the tracked face boxes - so one
-    stray detection cannot drag it - grown by `pad` for headroom, then snapped flush to an edge
-    only when the face genuinely sits off-centre toward it (see `_corner_sides`), so the source crop
-    is stable instead of floating.
+    there is nothing to derive from.
+
+    The detected box is only the *face*, so the tile is the **median** face box (one stray
+    detection cannot drag it) grown by `pad`, then widened to at least `min_width` of the source -
+    a panel should show a webcam tile, not a close-up of one cheek. It is **centred on the face**
+    and never snapped to a frame edge, because the tile is small relative to the frame and snapping
+    would move the crop off the face entirely. When `aspect` (width / height in pixels, e.g.
+    `gaming_panel_aspect`) is given, the tile is shaped to it so `_crop_inside` does not re-crop and
+    shift the window. The result is always clamped so the face stays inside the source frame.
     """
     faces = [point for point in track if point.width > 0 and point.height > 0]
     if len(faces) < max(1, int(min_hits)) or source_width <= 0 or source_height <= 0:
         return None
 
-    box_w = _median([point.width for point in faces]) * max(1.0, pad)
-    box_h = _median([point.height for point in faces]) * max(1.0, pad)
-    width = clamp(box_w, 0.0, 1.0)
-    height = clamp(box_h, 0.0, 1.0)
+    face_w = _median([point.width for point in faces]) * max(1.0, pad) * source_width
+    face_h = _median([point.height for point in faces]) * max(1.0, pad) * source_height
 
-    horizontal, vertical = _corner_sides(faces, majority=corner_majority)
-    if horizontal is None:
-        x = _median([point.x for point in faces]) - width / 2.0
+    tile_w = min(source_width, max(face_w, max(0.0, min_width) * source_width))
+    if aspect and aspect > 0:
+        tile_h = tile_w / aspect
+        if tile_h < face_h:
+            tile_h = face_h
+            tile_w = tile_h * aspect
     else:
-        x = 0.0 if horizontal else 1.0 - width
-    if vertical is None:
-        y = _median([point.y for point in faces]) - height / 2.0
-    else:
-        y = 0.0 if vertical else 1.0 - height
-    return (
-        clamp(x, 0.0, max(0.0, 1.0 - width)),
-        clamp(y, 0.0, max(0.0, 1.0 - height)),
-        width,
-        height,
-    )
+        tile_h = tile_w
+    tile_w = min(tile_w, source_width)
+    tile_h = min(tile_h, source_height)
+
+    centre_x = _median([point.x for point in faces]) * source_width
+    centre_y = _median([point.y for point in faces]) * source_height
+    x = clamp(centre_x - tile_w / 2.0, 0.0, max(0.0, source_width - tile_w))
+    y = clamp(centre_y - tile_h / 2.0, 0.0, max(0.0, source_height - tile_h))
+    return (x / source_width, y / source_height, tile_w / source_width, tile_h / source_height)
 
 
 def _crop_inside(
@@ -842,6 +805,18 @@ def _tighten_crop(
     return (x, y, width, height)
 
 
+def gaming_panel_aspect(width: float, height: float) -> float:
+    """
+    Pixel aspect ratio (width / height) of the bottom facecam panel for a canvas of `width`x`height`.
+
+    Exposed so the derived facecam box can be shaped to the panel it will fill, which keeps
+    `_crop_inside` from re-cropping the tile and shifting it off the face.
+    """
+    gameplay_h = round(height * GAMEPLAY_RATIO)
+    panel_h = max(1.0, height - gameplay_h - PANEL_GAP)
+    return width / panel_h
+
+
 def _gaming_layers(
     source_width: float,
     source_height: float,
@@ -849,7 +824,7 @@ def _gaming_layers(
     height: float,
     *,
     facecam: tuple[float, float, float, float] | None,
-    gameplay_ratio: float = 0.6,
+    gameplay_ratio: float = GAMEPLAY_RATIO,
 ) -> list[LayoutLayer]:
     """Gameplay on top, facecam panel below."""
     gameplay_h = round(height * gameplay_ratio)

@@ -779,16 +779,19 @@ Supporting knobs, all of which only matter once a crop strategy is chosen:
 
 **Deriving the facecam box (`facecam_box: auto`).** A hand-typed box is the reliable path, but it
 needs coordinates the streamer may not know. `auto` derives one from the clip's own face track:
-`facecam_box_from_track()` (pure, in `edit/layouts.py`) takes the tracked face boxes, uses the
-**median** centre and size (so one stray detection cannot drag it), grows the box by `facecam_pad`,
-and snaps it flush to the corner the face occupies for most of the clip (a face on the midline
-keeps its median position instead of being snapped). It is resolved in `plan_composition` - the
-first place a face track exists - and then travels the exact same `facecam_box` path a typed box
-does, `gaming` and all. It needs real face boxes, so it requires `layout_track_backend: opencv`;
-with the motion backend the track carries no box, so `auto` warns (`facecam_box_auto_failed`) and
-the layout degrades to `irl`/`fit_blur`. The box that was used is written back to `plan.json` as
-fractions with a `facecam_box_source` of `config` or `auto`, which also makes a re-render reuse the
-same box instead of deriving a new one.
+`facecam_box_from_track()` (pure, in `edit/layouts.py`) takes the tracked face boxes and uses the
+**median** centre and size (so one stray detection cannot drag it). The detected box is only the
+*face*, though, so it is grown by `facecam_pad` and then widened to at least `FACECAM_MIN_WIDTH`
+(0.22 of the source) - a panel should show a webcam tile, not a close-up of one cheek - and shaped to
+the panel's aspect (`gaming_panel_aspect`) so `_crop_inside` does not re-crop and shift the window.
+The tile is **centred on the face** and clamped to the frame; it is deliberately never snapped to a
+frame edge, because the tile is small relative to the frame and snapping would move the crop off the
+face entirely. It is resolved in `plan_composition` - the first place a face track exists - and then
+travels the exact same `facecam_box` path a typed box does, `gaming` and all. It needs real face
+boxes, so it requires `layout_track_backend: opencv`; with the motion backend the track carries no
+box, so `auto` warns (`facecam_box_auto_failed`) and the layout degrades to `irl`/`fit_blur`. The box
+that was used is written back to `plan.json` as fractions with a `facecam_box_source` of `config` or
+`auto`, which also makes a re-render reuse the same box instead of deriving a new one.
 
 
 Two internal constants shape the look and are not configurable: a crop only moves when the
