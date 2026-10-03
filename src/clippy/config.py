@@ -122,6 +122,9 @@ class Settings(BaseSettings):
     face_detection_width: int = 480
     face_min_size_ratio: float = 0.06
     face_min_hit_ratio: float = 0.2
+    # Minimum number of sampled frames a face must appear in before it can be the chosen webcam.
+    # Raises the bar above a chance hit; see `edit/faces.py::MIN_FACE_HITS`.
+    face_min_hits: int = 4
     # `"x,y,w,h"` (fractions of the frame when every value is <= 1, else pixels), blank for no
     # facecam, or `"auto"` to derive the box from the face track at composition time. `facecam_pad`
     # is the headroom grown around the detected face before it becomes the panel's source rectangle.

@@ -16,9 +16,13 @@ Everything here is deliberately defensive:
   framing. The caller then falls back to motion.
 
 Detections are grouped into spatial clusters across the whole clip, and the cluster that behaves
-like a webcam - one face, seen consistently, at a stable spot - is chosen. A per-frame greedy pick
-lets a single oversized or one-frame detection hijack the crop; the vote over the clip is what
-stops a game character, an on-screen poster or a second person steering the framing.
+like a webcam - a face seen consistently, and large enough to be a real camera rather than a face
+embedded in on-screen content - is chosen. A per-frame greedy pick lets a single oversized or
+one-frame detection hijack the crop; the vote over the clip is what stops a game character, an
+on-screen poster or a second person steering the framing. A candidate must clear a minimum number
+of detections, and the winner is the *time-weighted face area* (persistence x size), not raw
+persistence, so a small but ever-present face inside a screenshot, a post thumbnail or an avatar
+cannot outvote the larger webcam.
 
 Frames where the chosen face is not detected carry its previous position forward, so downstream
 segment logic sees a dense, calm track rather than a sparse, jumpy one.
@@ -46,6 +50,10 @@ SCALE_FACTOR = 1.1
 MIN_NEIGHBORS = 5
 MIN_SIZE_RATIO = 0.06
 MIN_HIT_RATIO = 0.2
+# A face must be seen in at least this many sampled frames before it can be the webcam. One or two
+# lucky detections (a stray giant box, a face that only flashes past) are not evidence of a webcam;
+# a handful of samples survives a couple of misses without letting a one-off detection win.
+MIN_FACE_HITS = 4
 
 # Clustering constants. A detection joins a cluster when its centre is within `CLUSTER_MAX_JUMP`
 # of that cluster's centre (a face cannot teleport between samples), and when its area is within
@@ -357,6 +365,7 @@ def face_track(
     width: int = DETECT_WIDTH,
     min_size_ratio: float = MIN_SIZE_RATIO,
     min_hit_ratio: float = MIN_HIT_RATIO,
+    min_hits: int = MIN_FACE_HITS,
     min_neighbors: int = MIN_NEIGHBORS,
     scale_factor: float = SCALE_FACTOR,
     ffmpeg_path: str = "ffmpeg",
@@ -365,11 +374,14 @@ def face_track(
     """
     Follow the clip's most webcam-like face, or return ``[]`` when there is no usable face.
 
-    Every sampled frame is detected once, then the detections are clustered across the whole clip
-    and the most persistent, size-consistent face wins. One point per sampled frame: the winning
-    cluster's centre when it has a detection, otherwise its previous position carried forward (and
-    the frame centre before its first detection). The box size is carried too, so the caption stage
-    can test the real face rectangle against the caption band instead of assuming a subject height.
+    Every sampled frame is detected once, then the detections are clustered across the whole clip.
+    Candidates seen in fewer than `min_hits` frames are dropped, and the survivor with the most
+    *time-weighted face area* (persistence x median area) wins - so a larger, reasonably-persistent
+    webcam beats a smaller face that merely appears more often inside on-screen content. One point
+    per sampled frame: the winning cluster's centre when it has a detection, otherwise its previous
+    position carried forward (and the frame centre before its first detection). The box size is
+    carried too, so the caption stage can test the real face rectangle against the caption band
+    instead of assuming a subject height.
 
     A clip whose best face appears in fewer than `min_hit_ratio` of frames is rejected, so a busy
     background - or a face that merely flashes past - cannot steer the framing; the caller then
@@ -405,8 +417,30 @@ def face_track(
         )
         return []
 
+    # Require a minimum number of detections before a cluster can be the webcam. This throws away
+    # one-off giant boxes and faces that only flash past, so the ranking below chooses between
+    # faces that are actually there rather than between lucky hits.
+    floor = max(1, int(min_hits))
+    eligible = [cluster for cluster in clusters if len(cluster.by_frame) >= floor]
+    if not eligible:
+        logger.info(
+            "Face track for %s: no face seen in >= %d sampled frames; keeping motion tracking",
+            media_path.name,
+            floor,
+        )
+        return []
+
+    # Rank by time-weighted face area (persistence x size): a bigger face seen often is the
+    # webcam, while a small face that rides along inside a screenshot/post/avatar loses even when
+    # it is detected more often. Persistence and area stay as tie-breakers for determinism.
     ranked = sorted(
-        clusters, key=lambda cluster: (cluster.persistence(total), cluster.median_area), reverse=True
+        eligible,
+        key=lambda cluster: (
+            cluster.persistence(total) * cluster.median_area,
+            cluster.persistence(total),
+            cluster.median_area,
+        ),
+        reverse=True,
     )
     winner = ranked[0]
     persistence = winner.persistence(total)
@@ -422,13 +456,15 @@ def face_track(
 
     runner_up = ranked[1].persistence(total) if len(ranked) > 1 else 0.0
     logger.info(
-        "Face track for %s: chose 1 of %d candidate face(s), seen in %d/%d frames (%.0f%%), "
-        "next best %.0f%%, centre (%.2f, %.2f)",
+        "Face track for %s: chose 1 of %d candidate face(s) (%d eligible), seen in %d/%d frames "
+        "(%.0f%%), median area %.4f, next best %.0f%%, centre (%.2f, %.2f)",
         media_path.name,
         len(clusters),
+        len(eligible),
         len(winner.by_frame),
         total,
         persistence * 100,
+        winner.median_area,
         runner_up * 100,
         winner.center[0],
         winner.center[1],

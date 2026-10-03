@@ -279,6 +279,7 @@ def track_subject(
                     width=settings.face_detection_width,
                     min_size_ratio=settings.face_min_size_ratio,
                     min_hit_ratio=settings.face_min_hit_ratio,
+                    min_hits=settings.face_min_hits,
                     ffmpeg_path=ffmpeg_path,
                     ffprobe_path=settings.ffprobe_path,
                 )

@@ -819,9 +819,12 @@ frame) and similar enough in size (area within `CLUSTER_SIZE_RATIO`, 2.5x of tha
 starts its own cluster, so a game character, an on-screen poster/thumbnail or a second person becomes
 a separate candidate. Comparing against the most recent box (rather than the cluster's median) is
 what keeps a face that slowly drifts or whose detected size jitters as one cluster instead of
-splitting it into half-persistent fragments. The winner is the cluster with the best
-`(persistence, median area)`, and it is rejected entirely unless it is seen in at least
-`face_min_hit_ratio` of sampled frames - at which point the clip falls back to motion. Only the
+splitting it into half-persistent fragments. Candidates seen in fewer than `face_min_hits` sampled
+frames are dropped first, then the winner is the cluster with the best **time-weighted face area**
+(`persistence x median area`), so a small face that merely rides along inside a screenshot, a post
+thumbnail or an avatar cannot outvote the bigger webcam. The winner is rejected entirely unless it
+is seen in at least `face_min_hit_ratio` of sampled frames - at which point the clip falls back to
+motion. Only the
 winning cluster's detections move the track; the frames it missed carry its last position forward, so
 the track stays dense and the layout stays calm. Each `face_track` call logs the number of candidate
 faces, the winner's persistence and the runner-up, so a shaky pick is visible.
@@ -834,6 +837,7 @@ and degraded rather than fatal.
 | `face_detection_width` | `480` | width of the grayscale frames the cascade sees: a speed/accuracy tradeoff |
 | `face_min_size_ratio` | `0.06` | smallest face worth believing, as a fraction of the frame |
 | `face_min_hit_ratio` | `0.2` | below this share of sampled frames the **chosen** face is rejected and motion takes over |
+| `face_min_hits` | `4` | sampled frames a face must appear in to be a candidate; drops one-off giant detections |
 
 ---
 
@@ -1215,7 +1219,7 @@ example config is not identical to a bare `Settings()`.
 | `layout_strategy` / `layout_track_backend` | `auto` / `motion` | how the frame is reframed, and what drives the crop |
 | `layout_smoothing` / `layout_zoom` | `0.12` / `1.0` | crop-pan responsiveness, and the zoom clamp |
 | `facecam_box` | `""` | `"x,y,w,h"`; fractions when the values are `<= 1`, else pixels |
-| `face_detection_width` / `face_min_size_ratio` / `face_min_hit_ratio` | `480` / `0.06` / `0.2` | face backend only: the frame size the cascade sees, the smallest believable face, and the share of frames the chosen (most persistent) face must appear in before it is trusted |
+| `face_detection_width` / `face_min_size_ratio` / `face_min_hit_ratio` / `face_min_hits` | `480` / `0.06` / `0.2` / `4` | face backend only: the frame size the cascade sees, the smallest believable face, the share of frames the chosen face must appear in, and the minimum detections to be a candidate at all |
 | `quality_warn_upscale` | `2.0` | upscale factor above which a plan carries `upscale_exceeds_threshold` |
 | `render_crf` / `intermediate_crf` / `render_preset` | `20` / `16` / `veryfast` | encode quality of the deliverable, of the intermediates, and the x264 speed/size preset |
 | `render_encoder` | `auto` | `auto`, `x264` or `nvenc` |

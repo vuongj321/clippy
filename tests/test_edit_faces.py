@@ -267,3 +267,46 @@ def test_face_track_rejects_a_face_that_only_flashes_by(monkeypatch):
     assert points == []
 
 
+def test_face_track_prefers_the_larger_face_over_a_smaller_more_persistent_one(monkeypatch):
+    """
+    The webcam outranks a smaller face inside on-screen content even when it is seen less often.
+
+    This is the gaming case that regressed in practice: a big frontal face inside a screenshot or
+    post thumbnail is detected more often than the (larger) real webcam, so a persistence-first
+    vote picked the on-screen face and cropped the facecam panel onto it.
+    """
+    monkeypatch.setattr(faces, "sample_gray_frames", lambda *a, **k: _fake_frames(120))
+    webcam = (0.78, 0.20, 0.10, 0.17)  # area 0.017, seen in a third of frames
+    thumbnail = (0.36, 0.25, 0.054, 0.096)  # area 0.005, seen in half the frames
+    monkeypatch.setattr(
+        faces,
+        "detect_faces",
+        _detector_per_frame(
+            lambda i: ([thumbnail] if i % 2 == 0 else []) + ([webcam] if i % 3 == 0 else [])
+        ),
+    )
+
+    points = faces.face_track(Path("whatever.mp4"), duration_seconds=20.0, sample_fps=6.0)
+
+    assert len(points) == 120
+    assert all(point.x == pytest.approx(0.83) for point in points)
+    assert all(point.width == pytest.approx(0.10) for point in points)
+
+
+def test_face_track_ignores_a_face_seen_in_too_few_frames(monkeypatch):
+    """A large face that only shows up in a couple of samples cannot win the webcam vote."""
+    monkeypatch.setattr(faces, "sample_gray_frames", lambda *a, **k: _fake_frames(60))
+    steady = (0.1, 0.5, 0.1, 0.12)  # the webcam, in every frame
+    flash = (0.6, 0.4, 0.30, 0.34)  # bigger, but only three frames
+    monkeypatch.setattr(
+        faces,
+        "detect_faces",
+        _detector_per_frame(lambda i: [steady, flash] if i < 3 else [steady]),
+    )
+
+    points = faces.face_track(Path("whatever.mp4"), duration_seconds=10.0, sample_fps=6.0)
+
+    assert len(points) == 60
+    assert all(point.x == pytest.approx(0.15) for point in points)
+
+

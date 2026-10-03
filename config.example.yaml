@@ -92,6 +92,7 @@ facecam_pad: 1.6              # headroom grown around the detected face before i
 # face_detection_width: 480    # width of the grayscale frames the cascade sees
 # face_min_size_ratio: 0.06    # smallest face worth believing, as a fraction of the frame
 # face_min_hit_ratio: 0.2      # share of frames the chosen (most persistent) face must appear in
+# face_min_hits: 4             # sampled frames a face must appear in before it can be the webcam
 
 # Render + audio + metadata
 render_crf: 20
