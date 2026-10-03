@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Callable, Sequence
 
+from clippy.caption.asr import TranscriptWord
 from clippy.config import Settings
 from clippy.edit.plan import ClipBounds, phase1_bounds
 from clippy.store.db import Candidate
@@ -634,6 +635,50 @@ def evidence_from_chat(
     """Chat-only evidence (no transcript, no audio decode) for planning a window."""
     return ContextEvidence(
         chat_times=[float(t) for t in chat_times if start <= float(t) <= end]
+    )
+
+
+def words_to_evidence(
+    words: Sequence[TranscriptWord], *, window_start: float
+) -> list[Word]:
+    """Map ASR word timings from a window-relative timeline onto the source timeline."""
+    return [
+        Word(
+            start=window_start + float(word.start),
+            end=window_start + float(word.end),
+            text=word.text,
+        )
+        for word in words
+        if word.end > word.start
+    ]
+
+
+def build_context_evidence(
+    *,
+    start: float,
+    end: float,
+    chat_times: Sequence[float] = (),
+    words: Sequence[Word] = (),
+    rms_times: Sequence[float] = (),
+    rms_values: Sequence[float] = (),
+) -> ContextEvidence:
+    """
+    Combine every evidence source into one `ContextEvidence`, filtered to [start, end].
+
+    Word and chat times are on the source (stream-relative) timeline, so callers map ASR
+    output with `words_to_evidence` first. The RMS series stays index-paired, because
+    `ContextEvidence.has_audio` only trusts a series whose times and values line up.
+    """
+    audio = [
+        (float(moment), float(value))
+        for moment, value in zip(rms_times, rms_values)
+        if start <= float(moment) <= end
+    ]
+    return ContextEvidence(
+        words=[w for w in words if w.end > start and w.start < end],
+        chat_times=[float(t) for t in chat_times if start <= float(t) <= end],
+        rms_times=[moment for moment, _ in audio],
+        rms_values=[value for _, value in audio],
     )
 
 

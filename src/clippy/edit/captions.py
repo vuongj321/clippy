@@ -94,6 +94,55 @@ def _load_or_transcribe(
     return payload, None
 
 
+def transcribe_window_words(
+    media_path: Path,
+    *,
+    settings: Settings,
+    cache_path: Path | None = None,
+    force: bool = False,
+) -> TranscriptPayload | None:
+    """
+    Word-timed ASR for a review window, cached on disk. Never raises.
+
+    Boundary detection needs word timings *before* the clip is cut, so this transcribes the
+    Phase-1 review window rather than the (not yet extracted) trimmed clip. Returns None when
+    there is no API key, the media is missing, or the endpoint fails, leaving the caller to
+    degrade to whatever evidence it already has.
+    """
+    api_key = (settings.openai_api_key or "").strip()
+    if not api_key or not media_path.exists():
+        return None
+
+    if cache_path is not None and cache_path.exists() and not force:
+        try:
+            cached = TranscriptPayload.from_dict(
+                json.loads(cache_path.read_text(encoding="utf-8"))
+            )
+        except Exception:
+            logger.warning("Ignoring unreadable boundary transcript %s", cache_path)
+        else:
+            if cached.segments:
+                logger.info("Reusing cached boundary transcript %s", cache_path)
+                return cached
+
+    try:
+        payload = transcribe_words(
+            media_path,
+            api_key=api_key,
+            base_url=settings.openai_base_url,
+            model=settings.asr_model,
+            word_timestamps=True,
+        )
+    except Exception:
+        logger.exception("Boundary window transcription failed for %s", media_path)
+        return None
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(payload.to_dict(), indent=2), encoding="utf-8")
+    return payload
+
+
 def _resolve_emphasis(
     cues: list[Cue],
     *,

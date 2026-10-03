@@ -62,12 +62,16 @@ class Settings(BaseSettings):
     clip_max_seconds: float = 45.0
     clip_target_seconds: float = 30.0
     boundary_search_seconds: float = 20.0
-    hook_lookback_seconds: float = 8.0
+    hook_lookback_seconds: float = 30.0
     min_context_seconds: float = 1.5
     reaction_tail_seconds: float = 3.0
     boundary_min_silence_seconds: float = 0.35
     word_gap_min_seconds: float = 0.08
     boundary_llm_refine: bool = False
+    # Evidence sources for boundary detection. Transcript evidence costs one cached ASR call
+    # per candidate and degrades to chat / Phase-1 bounds on any failure.
+    boundary_transcript_evidence: bool = True
+    boundary_audio_evidence: bool = False
     extract_duration_tolerance_seconds: float = 0.5
 
     # --- Phase 2: dead-air removal ---

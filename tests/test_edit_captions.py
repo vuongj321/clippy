@@ -28,7 +28,7 @@ from clippy.caption.emphasis import (
 )
 from clippy.caption.styles import caption_anchor, resolve_anchor, resolve_style
 from clippy.config import Settings
-from clippy.edit.captions import generate_captions
+from clippy.edit.captions import generate_captions, transcribe_window_words
 from clippy.edit.plan import WARN_EMPHASIS_FALLBACK, EditPaths, EditPlan, build_plan
 from clippy.store.db import Candidate, Stream
 
@@ -630,3 +630,46 @@ def test_generate_captions_honours_the_plan_emphasis_override(monkeypatch, tmp_p
     assert settings.caption_emphasis == "heuristic"
     assert result.emphasis == set()
     assert result.emphasis_source == "off"
+
+
+def test_transcribe_window_words_caches_and_degrades(monkeypatch, tmp_path: Path):
+    media = tmp_path / "window.mp4"
+    media.write_bytes(b"\x00" * 16)
+    cache = tmp_path / "boundary_transcript.json"
+    settings = _settings(tmp_path)
+    payload = _payload()
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "clippy.edit.captions.transcribe_words",
+        lambda *a, **k: (calls.append(1), payload)[1],
+    )
+
+    first = transcribe_window_words(media, settings=settings, cache_path=cache)
+    assert first is not None
+    assert cache.exists()
+
+    second = transcribe_window_words(media, settings=settings, cache_path=cache)
+    assert second is not None
+    assert len(calls) == 1  # the second read came from the cache, not ASR
+
+
+def test_transcribe_window_words_degrades_without_a_key(tmp_path: Path):
+    media = tmp_path / "window.mp4"
+    media.write_bytes(b"\x00" * 16)
+    settings = _settings(tmp_path, openai_api_key="")
+
+    assert transcribe_window_words(media, settings=settings) is None
+
+
+def test_transcribe_window_words_returns_none_on_error(monkeypatch, tmp_path: Path):
+    media = tmp_path / "window.mp4"
+    media.write_bytes(b"\x00" * 16)
+    settings = _settings(tmp_path)
+
+    def boom(*a, **k):
+        raise httpx.ConnectError("no route")
+
+    monkeypatch.setattr("clippy.edit.captions.transcribe_words", boom)
+
+    assert transcribe_window_words(media, settings=settings) is None

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from clippy.caption.asr import TranscriptWord
 from clippy.config import Settings
 from clippy.edit.boundaries import (
     ContextEvidence,
@@ -12,6 +13,7 @@ from clippy.edit.boundaries import (
     adjust_start,
     apply_llm_bounds,
     audio_decay_ts,
+    build_context_evidence,
     chat_burst_end_ts,
     detect_bounds,
     enforce_constraints,
@@ -19,6 +21,7 @@ from clippy.edit.boundaries import (
     refine_bounds_with_llm,
     speech_gaps,
     utterance_containing,
+    words_to_evidence,
     words_to_utterances,
 )
 from clippy.store.db import Candidate
@@ -429,6 +432,59 @@ def test_context_evidence_requires_paired_audio_series():
     assert ContextEvidence(rms_times=[1.0], rms_values=[0.1]).has_audio() is True
     assert ContextEvidence(rms_times=[1.0, 2.0], rms_values=[0.1]).has_audio() is False
     assert ContextEvidence(words=[Word(start=0.0, end=1.0)]).has_transcript() is True
+
+
+def test_words_to_evidence_offsets_onto_the_source_timeline():
+    window = [TranscriptWord(0.0, 0.5, "he"), TranscriptWord(0.6, 1.0, "did")]
+    words = words_to_evidence(window, window_start=90.0)
+    assert [(word.start, word.end) for word in words] == [(90.0, 90.5), (90.6, 91.0)]
+    assert [word.text for word in words] == ["he", "did"]
+
+
+def test_words_to_evidence_drops_zero_length_words():
+    window = [TranscriptWord(1.0, 1.0, "uh"), TranscriptWord(2.0, 2.5, "ok")]
+    words = words_to_evidence(window, window_start=10.0)
+    assert [(word.start, word.end) for word in words] == [(12.0, 12.5)]
+
+
+def test_build_context_evidence_filters_and_keeps_audio_paired():
+    evidence = build_context_evidence(
+        start=90.0,
+        end=100.0,
+        chat_times=[80.0, 95.0, 140.0],
+        words=_words([(85.0, 89.0, "before"), (92.0, 93.0, "in"), (120.0, 121.0, "after")]),
+        rms_times=[88.0, 92.0, 120.0],
+        rms_values=[0.01, 0.3, 0.2],
+    )
+    assert evidence.chat_times == [95.0]
+    assert [word.text for word in evidence.words] == ["in"]
+    assert evidence.rms_times == [92.0]
+    assert evidence.rms_values == [0.3]
+    assert evidence.has_audio() is True
+
+
+def test_words_to_evidence_drive_detect_bounds(tmp_path: Path):
+    """Word timings on the source timeline make the hook snap to the setup line."""
+    settings = _settings(tmp_path, hook_lookback_seconds=30.0)
+    window = [
+        TranscriptWord(0.0, 2.0, "so"),
+        TranscriptWord(2.2, 5.0, "anyway"),
+        TranscriptWord(8.0, 10.0, "he"),
+        TranscriptWord(10.0, 12.0, "did"),
+        TranscriptWord(16.0, 18.0, "wow"),
+    ]
+    evidence = build_context_evidence(
+        start=70.0, end=130.0, words=words_to_evidence(window, window_start=90.0)
+    )
+    decision = detect_bounds(
+        candidate=_candidate(), settings=settings, evidence=evidence
+    )
+    assert decision.bounds.method == "signal_evidence"
+    # hook walks back to the setup utterance (90.0) rather than a fixed offset
+    assert decision.bounds.start == pytest.approx(90.0)
+    assert decision.evidence.hook_utterance_start_ts == pytest.approx(90.0)
+    # the end snaps to the gap after the sentence that carries the main event
+    assert decision.bounds.end == pytest.approx(102.0)
 
 
 

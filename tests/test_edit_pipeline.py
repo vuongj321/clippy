@@ -566,3 +566,85 @@ def test_auto_captions_follow_the_resolved_framing(monkeypatch, tmp_path: Path):
     assert style_line.split(",")[18] == "8"
 
 
+def test_boundary_context_reads_the_phase1_window(monkeypatch, tmp_path: Path):
+    """A render derives word timings from the Phase-1 window and maps them to source time."""
+    from clippy.edit import pipeline as pipeline_module
+
+    media = _media_file(tmp_path, "window.mp4")
+    settings = _settings(tmp_path, openai_api_key="sk-test")
+    db = Database(settings.resolved_db_path())
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(streamer.id, "vod", media_path=str(media))
+    candidate = db.create_candidate(
+        stream.id,
+        source_ts=100.0,
+        pre_context_seconds=30.0,
+        post_context_seconds=30.0,
+        signals={"kind": "keyword"},
+        score=0.9,
+        media_path=str(media),
+    )
+    job = EditJob(candidate=candidate, stream=stream, source_path=media)
+    paths = EditPaths.for_candidate(settings, candidate.id)
+
+    payload = TranscriptPayload(
+        text="he did wow",
+        segments=[
+            TranscriptSegment(
+                start=0.0,
+                end=2.5,
+                text="he did wow",
+                words=[TranscriptWord(0.0, 0.5, "he"), TranscriptWord(2.0, 2.5, "did")],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        pipeline_module, "transcribe_window_words", lambda *a, **k: payload
+    )
+
+    evidence = pipeline_module._boundary_context(
+        settings, job, paths, chat_times=[], dry_run=False, force=False
+    )
+
+    # window_start = source_ts - pre_context_seconds == 70.0
+    assert evidence.has_transcript() is True
+    assert [(word.start, word.end) for word in evidence.words] == [
+        (70.0, 70.5),
+        (72.0, 72.5),
+    ]
+
+
+def test_boundary_context_skips_transcript_on_dry_run(monkeypatch, tmp_path: Path):
+    from clippy.edit import pipeline as pipeline_module
+
+    media = _media_file(tmp_path, "window.mp4")
+    settings = _settings(tmp_path, openai_api_key="sk-test")
+    db = Database(settings.resolved_db_path())
+    streamer = db.get_or_create_streamer("tester", "Tester")
+    stream = db.create_stream(streamer.id, "vod", media_path=str(media))
+    candidate = db.create_candidate(
+        stream.id,
+        source_ts=100.0,
+        pre_context_seconds=30.0,
+        post_context_seconds=30.0,
+        signals={"kind": "keyword"},
+        score=0.9,
+        media_path=str(media),
+    )
+    job = EditJob(candidate=candidate, stream=stream, source_path=media)
+    paths = EditPaths.for_candidate(settings, candidate.id)
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        pipeline_module, "transcribe_window_words", lambda *a, **k: calls.append(1)
+    )
+
+    evidence = pipeline_module._boundary_context(
+        settings, job, paths, chat_times=[75.0], dry_run=True, force=False
+    )
+
+    assert calls == []  # a dry run stays offline by contract
+    assert evidence.has_transcript() is False
+    assert evidence.chat_times == [75.0]
+
+

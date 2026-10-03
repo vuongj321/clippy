@@ -1190,10 +1190,12 @@ example config is not identical to a bare `Settings()`.
 | `clip_min_seconds` / `clip_max_seconds` | `10.0` / `45.0` | hard bounds on the finished clip |
 | `clip_target_seconds` | `30.0` | preferred length before dead air is removed |
 | `boundary_search_seconds` | `20.0` | how far around the candidate the boundary stage may look |
-| `hook_lookback_seconds` | `8.0` | lead-in kept so the clip has a run-up |
+| `hook_lookback_seconds` | `30.0` | furthest the hook may walk back to the setup line |
 | `min_context_seconds` / `reaction_tail_seconds` | `1.5` / `3.0` | context kept before a cut, and reaction kept after the moment |
 | `boundary_min_silence_seconds` / `word_gap_min_seconds` | `0.35` / `0.08` | the shortest silence and word gap the boundary stage will cut on |
 | `boundary_llm_refine` | `false` | opt-in LLM refinement of the chosen bounds |
+| `boundary_transcript_evidence` | `true` | ASR the cached Phase-1 review window for word timings so the hook/end snap to real speech; degrades to chat / Phase-1 bounds on any failure |
+| `boundary_audio_evidence` | `false` | opt-in RMS-decay evidence (noisier than words) |
 | `extract_duration_tolerance_seconds` | `0.5` | how far `base.mp4` may deviate before the plan warns |
 | `deadair_enabled` / `deadair_mode` | `true` / `cut` | `cut` removes silence, `speed` shortens it |
 | `deadair_noise_db` / `deadair_min_gap_seconds` | `-30.0` / `0.8` | what counts as silence, and the shortest gap worth removing |

@@ -467,7 +467,7 @@ clippy-edit --candidate 5 --no-captions --keep-intermediate
 | Group | Keys |
 | ----- | ---- |
 | Capture | `source_dir`, `capture_quality`, `capture_downloader`, `capture_source_offset_seconds`, `source_budget_gb`, `alignment_tolerance_seconds` |
-| Bounds | `clip_min_seconds`, `clip_max_seconds`, `clip_target_seconds`, `boundary_search_seconds`, `hook_lookback_seconds`, `min_context_seconds`, `reaction_tail_seconds`, `boundary_min_silence_seconds`, `word_gap_min_seconds`, `boundary_llm_refine`, `extract_duration_tolerance_seconds` |
+| Bounds | `clip_min_seconds`, `clip_max_seconds`, `clip_target_seconds`, `boundary_search_seconds`, `hook_lookback_seconds`, `min_context_seconds`, `reaction_tail_seconds`, `boundary_min_silence_seconds`, `word_gap_min_seconds`, `boundary_llm_refine`, `boundary_transcript_evidence`, `boundary_audio_evidence`, `extract_duration_tolerance_seconds` |
 | Dead air | `deadair_enabled`, `deadair_mode`, `deadair_noise_db`, `deadair_min_gap_seconds`, `deadair_keep_pad_seconds`, `deadair_min_keep_seconds` |
 | Captions | `caption_enabled`, `caption_style`, `caption_font`, `caption_font_size`, `caption_max_chars_per_line`, `caption_max_lines`, `caption_max_cue_seconds`, `caption_min_cue_seconds`, `caption_break_gap_seconds`, `caption_emphasis`, `caption_primary_color`, `caption_highlight_color`, `caption_margin_v`, `caption_safe_area`, `caption_avoid_ratio`, `caption_uppercase`, `asr_provider`, `asr_word_timestamps` |
 | Vertical | `clip_target_width`, `clip_target_height`, `clip_fps`, `layout_strategy`, `layout_track_backend`, `layout_smoothing`, `layout_zoom`, `facecam_box`, `facecam_pad`, `quality_warn_upscale` |
@@ -617,7 +617,7 @@ Fixes:
 
 - `src/clippy/edit/boundaries.py` - `Word`/`Utterance`/`ContextEvidence`/`BoundaryEvidence`/`BoundaryDecision`, `words_to_utterances`, `speech_gaps`, `adjust_start`/`adjust_end` (never mid-word), `chat_burst_end_ts`, `audio_decay_ts`, `enforce_constraints`, `detect_bounds`, `apply_llm_bounds` + `refine_bounds_with_llm` (injected, clamped), `evidence_from_chat`.
 - `edit/plan.py` - plans carry `boundary_evidence` (evidence + every adjustment); `build_plan` accepts evidence-driven bounds and only flags `boundaries_pending` when they are missing or fell back.
-- `edit/pipeline.py` - `run_edit_pipeline(..., chat_path=...)` builds chat evidence per candidate; summary gains `chat_evidence` and `evidence_bounds`.
+- `edit/pipeline.py` - `run_edit_pipeline(..., chat_path=...)` builds chat evidence per candidate; summary gains `chat_evidence` and `evidence_bounds`. `_boundary_context` also derives word timings from the cached Phase-1 window (`transcribe_window_words` -> `boundary_transcript.json`), so the hook and end snap to real speech; transcript evidence is skipped in `--dry-run` and degrades to chat / Phase-1 bounds on any failure.
 - `cli.py` - `clippy-edit --chat <json>`.
 - `tests/test_edit_boundaries.py` - 33 tests.
 

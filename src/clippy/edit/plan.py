@@ -415,6 +415,7 @@ ARTIFACT_NAMES = {
     "base": "base.mp4",
     "trimmed": "trimmed.mp4",
     "transcript": "transcript.json",
+    "boundary_transcript": "boundary_transcript.json",
     "captions": "captions.ass",
     "layout": "layout.json",
     "vertical": "vertical.mp4",
@@ -434,6 +435,7 @@ class EditPaths:
     base: Path
     trimmed: Path
     transcript: Path
+    boundary_transcript: Path
     captions: Path
     layout: Path
     vertical: Path
@@ -451,6 +453,7 @@ class EditPaths:
             base=root / ARTIFACT_NAMES["base"],
             trimmed=root / ARTIFACT_NAMES["trimmed"],
             transcript=root / ARTIFACT_NAMES["transcript"],
+            boundary_transcript=root / ARTIFACT_NAMES["boundary_transcript"],
             captions=root / ARTIFACT_NAMES["captions"],
             layout=root / ARTIFACT_NAMES["layout"],
             vertical=root / ARTIFACT_NAMES["vertical"],

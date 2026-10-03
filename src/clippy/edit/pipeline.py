@@ -13,13 +13,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from clippy.audio.intensity import probe_duration_seconds
+from clippy.audio.intensity import compute_rms_series, extract_mono_pcm, probe_duration_seconds
 from clippy.caption.chat_context import build_chat_context
 from clippy.chat.models import ChatMessage, load_chat_json
 from clippy.config import Settings
 from clippy.edit.audio import normalize_audio
-from clippy.edit.boundaries import detect_bounds, evidence_from_chat
-from clippy.edit.captions import generate_captions
+from clippy.edit.boundaries import (
+    ContextEvidence,
+    Word,
+    build_context_evidence,
+    detect_bounds,
+    words_to_evidence,
+)
+from clippy.edit.captions import generate_captions, transcribe_window_words
 from clippy.edit.metadata import capture_thumbnail, generate_metadata
 from clippy.edit.plan import (
     EditOverrides,
@@ -134,6 +140,82 @@ def _existing_plan(settings: Settings, job: EditJob) -> EditPlan | None:
     return existing
 
 
+def _boundary_context(
+    settings: Settings,
+    job: EditJob,
+    paths: EditPaths,
+    *,
+    chat_times: Sequence[float],
+    dry_run: bool,
+    force: bool,
+) -> ContextEvidence:
+    """
+    Everything boundary detection is allowed to look at.
+
+    Chat timestamps always; word timings from the Phase-1 review window when an ASR key is
+    configured and a real render (not ``dry_run``) is underway. Transcript evidence is cached
+    and best-effort: any failure leaves the clip on chat / Phase-1 bounds.
+    """
+    window_start = max(0.0, job.candidate.source_ts - job.candidate.pre_context_seconds)
+    window_end = job.candidate.source_ts + job.candidate.post_context_seconds
+
+    words: list[Word] = []
+    if settings.boundary_transcript_evidence and not dry_run:
+        window_media = Path(job.candidate.media_path) if job.candidate.media_path else None
+        if (
+            window_media is not None
+            and window_media.exists()
+            and (settings.openai_api_key or "").strip()
+        ):
+            payload = transcribe_window_words(
+                window_media,
+                settings=settings,
+                cache_path=paths.boundary_transcript,
+                force=force,
+            )
+            if payload is not None:
+                words = words_to_evidence(payload.words(), window_start=window_start)
+
+    rms_times: list[float] = []
+    rms_values: list[float] = []
+    if settings.boundary_audio_evidence and not dry_run:
+        rms_times, rms_values = _window_rms(
+            job.source_path, start=window_start, end=window_end, settings=settings
+        )
+
+    return build_context_evidence(
+        start=window_start,
+        end=window_end,
+        chat_times=chat_times,
+        words=words,
+        rms_times=rms_times,
+        rms_values=rms_values,
+    )
+
+
+def _window_rms(
+    media_path: Path, *, start: float, end: float, settings: Settings
+) -> tuple[list[float], list[float]]:
+    """RMS over the search window, moved onto the source timeline (opt-in audio evidence)."""
+    duration = end - start
+    if duration <= 0:
+        return [], []
+    try:
+        samples = extract_mono_pcm(
+            media_path,
+            start_seconds=start,
+            duration_seconds=duration,
+            ffmpeg_path=settings.ffmpeg_path,
+        )
+    except Exception:
+        logger.exception("Boundary window audio decode failed for %s", media_path)
+        return [], []
+    times, values = compute_rms_series(
+        samples, frame_seconds=settings.audio_frame_seconds
+    )
+    return [start + float(moment) for moment in times], [float(value) for value in values]
+
+
 def run_edit_pipeline(
     *,
     settings: Settings,
@@ -191,26 +273,23 @@ def run_edit_pipeline(
             db.create_render(job.candidate.id, kind="plan", status="failed", error=message)
             continue
 
+        paths = EditPaths.for_candidate(settings, job.candidate.id)
+        evidence = _boundary_context(
+            settings, job, paths, chat_times=chat_times, dry_run=dry_run, force=force
+        )
+
         decision = None
-        if chat_times:
-            window_start = max(
-                0.0, job.candidate.source_ts - job.candidate.pre_context_seconds
-            )
-            window_end = job.candidate.source_ts + job.candidate.post_context_seconds
+        if evidence.words or evidence.chat_times or evidence.rms_times:
             decision = detect_bounds(
-                candidate=job.candidate,
-                settings=settings,
-                evidence=evidence_from_chat(
-                    chat_times, start=window_start, end=window_end
-                ),
+                candidate=job.candidate, settings=settings, evidence=evidence
             )
             if decision.bounds.method != "phase1_window":
                 evidence_bounds += 1
 
-        # A re-plan with no chat evidence cannot re-derive the cut, and the Phase 1 window would
-        # quietly replace a chat-derived one - the usual case for the UI render form, which passes
-        # no chat unless the reviewer names a dump. Keep the boundaries the candidate already has
-        # when the source is unchanged rather than silently moving the clip.
+        # Bounds are re-derived whenever there is evidence (chat and/or transcript). The recorded
+        # plan is only the fallback for a cut we cannot re-derive - a dry run, or a candidate with
+        # neither a chat dump nor a transcript - so the clip never resets to the Phase 1 window it
+        # was cut away from.
         if decision is not None:
             bounds = decision.bounds
             boundary_evidence = {
@@ -236,7 +315,6 @@ def run_edit_pipeline(
         if source_offset_seconds is not None:
             plan.source_offset_seconds = source_offset_seconds
 
-        paths = EditPaths.for_candidate(settings, job.candidate.id)
         paths.ensure_root()
         plan.set_stage("planned")
         plan.save(paths.plan)
