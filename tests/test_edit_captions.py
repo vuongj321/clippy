@@ -161,6 +161,9 @@ def test_write_ass_emits_a_karaoke_track(tmp_path: Path):
     assert "\\k50" in text  # 0.5s word as karaoke centiseconds
     assert style.highlight_colour in text
     assert "\\fscx" not in text  # karaoke presets carry no pop scale
+    # Regression: the tagged words must stay separated or the burned cue reads "THISis".
+    assert " {\\k30}is" in text
+    assert "THISis" not in text
 
 
 def test_write_ass_plain_style_has_no_karaoke_tags(tmp_path: Path):
@@ -172,6 +175,7 @@ def test_write_ass_plain_style_has_no_karaoke_tags(tmp_path: Path):
     )
     assert "\\k" not in text
     assert "HELLO" not in text
+    assert "Hello world" in text  # plain styles already keep the spaces between words
 
 
 def test_write_ass_with_no_cues_is_still_valid(tmp_path: Path):

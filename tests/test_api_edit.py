@@ -63,7 +63,7 @@ def _seed(
             "\n".join(
                 [
                     "[Script Info]",
-                    "Dialogue: 0,0:00:00.00,0:00:02.00,Caption,,0,0,0,,{\\k50}CLIP{\\k50}THIS",
+                    "Dialogue: 0,0:00:00.00,0:00:02.00,Caption,,0,0,0,,{\\k50}CLIP {\\k50}THIS",
                     "Dialogue: 0,0:00:02.00,0:00:04.00,Caption,,0,0,0,,A second cue",
                 ]
             ),
@@ -113,8 +113,8 @@ def test_candidate_page_shows_the_edit(tmp_path: Path):
     assert "Dead air" in body
     assert "Re-render" in body
     assert f"/candidates/{candidate.id}/download" in body
-    # Cue text is shown without ASS override tags.
-    assert "CLIPTHIS" in body
+    # Cue text is shown without ASS override tags, but the word spacing is preserved.
+    assert "CLIP THIS" in body
     assert "{\\k50}" not in body
     assert "Metadata" in body
 

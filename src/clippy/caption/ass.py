@@ -87,7 +87,10 @@ def karaoke_text(cue: Cue, *, style: CaptionStyle, emphasis: set[str]) -> str:
             parts.append(f"{{{scale}\\b1}}{{\\k{centis}}}{text}{{\\r}}")
         else:
             parts.append(f"{{\\k{centis}}}{text}")
-    return "".join(parts)
+    # Every word was stripped of its surrounding whitespace above, so the separator has to be
+    # put back here. Joining the tagged words with no space ran the whole cue together and the
+    # burned-in captions read "Ohshit" instead of "Oh shit".
+    return " ".join(parts)
 
 
 def plain_text(cue: Cue, *, style: CaptionStyle, emphasis: set[str]) -> str:
