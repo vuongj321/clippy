@@ -4,6 +4,7 @@ import builtins
 import shutil
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from clippy.config import Settings
@@ -33,19 +34,14 @@ def test_even_rounds_down_to_even_dimensions():
     assert faces.even(1) == 2
 
 
-def test_pick_face_prefers_the_largest():
-    big = (0.6, 0.1, 0.2, 0.2)
-    small = (0.05, 0.05, 0.05, 0.05)
-    assert faces.pick_face([small, big]) == big
-    assert faces.pick_face([]) is None
+def test_cluster_faces_keeps_the_larger_box_when_two_claim_one_frame():
+    """Two boxes in one frame that fall in the same cluster: the bigger one owns the frame."""
+    big = (0.10, 0.50, 0.14, 0.16)
+    small = (0.12, 0.52, 0.11, 0.13)  # similar enough in size to join, but smaller
+    clusters = faces._cluster_faces([[big, small]])
 
-
-def test_pick_face_prefers_the_previous_face_when_sizes_are_similar():
-    """Two similar faces must not make the crop flicker between them."""
-    left = (0.1, 0.2, 0.2, 0.2)
-    right = (0.7, 0.2, 0.21, 0.21)  # marginally larger, but far from the previous face
-    assert faces.pick_face([left, right], previous=left) == left
-    assert faces.pick_face([left, right]) == right
+    assert len(clusters) == 1
+    assert clusters[0].by_frame[0] == big
 
 
 def test_available_reports_a_missing_opencv(monkeypatch):
@@ -140,4 +136,134 @@ def test_track_subject_survives_a_detector_failure(monkeypatch, tmp_path: Path):
 
     points = track_subject(FIXTURE, duration_seconds=1.0, settings=settings)
     assert all(point.height == 0.0 for point in points)  # fell back to motion
+
+
+def _fake_frames(count: int) -> np.ndarray:
+    """Blank sampled frames: the detections are faked, so the pixels carry no information."""
+    return np.zeros((count, 36, 64), dtype=np.uint8)
+
+
+def _detector_per_frame(boxes_by_index):
+    """A `detect_faces` stand-in that returns a scripted list of boxes per call, in order."""
+    calls = {"index": 0}
+
+    def fake_detect(frame, **kwargs):  # noqa: ARG001 - the image is irrelevant here
+        index = calls["index"]
+        calls["index"] += 1
+        return list(boxes_by_index(index))
+
+    return fake_detect
+
+
+def test_cluster_faces_merges_the_same_face_across_frames():
+    box = (0.1, 0.5, 0.1, 0.12)
+    clusters = faces._cluster_faces([[box] for _ in range(30)])
+
+    assert len(clusters) == 1
+    assert clusters[0].persistence(30) == pytest.approx(1.0)
+
+
+def test_cluster_faces_splits_two_positions_that_never_overlap():
+    left = (0.1, 0.5, 0.1, 0.12)
+    right = (0.8, 0.5, 0.1, 0.12)
+    clusters = faces._cluster_faces([[left if i % 2 == 0 else right] for i in range(40)])
+
+    assert len(clusters) == 2
+    assert sorted(cluster.persistence(40) for cluster in clusters) == [
+        pytest.approx(0.5),
+        pytest.approx(0.5),
+    ]
+
+
+def test_cluster_faces_keeps_a_much_larger_box_separate():
+    """A face-sized box and a poster-sized one at the same spot are two candidates, not one."""
+    small = (0.1, 0.5, 0.1, 0.12)
+    huge = (0.12, 0.5, 0.4, 0.45)
+    clusters = faces._cluster_faces([[small], [small], [huge]])
+
+    assert len(clusters) == 2
+
+
+def test_cluster_faces_keeps_a_drifting_face_as_one_cluster():
+    """A face that crosses the frame in small steps is one candidate, not several fragments."""
+    boxes = [[(0.2 + index * 0.01, 0.5, 0.1, 0.12)] for index in range(30)]
+    clusters = faces._cluster_faces(boxes)
+
+    assert len(clusters) == 1
+    assert clusters[0].persistence(30) == pytest.approx(1.0)
+
+
+def test_cluster_faces_keeps_a_size_jittering_face_as_one_cluster():
+    """Detected box size wobbles frame to frame; that must not split the face in two."""
+    sizes = [(0.10, 0.12), (0.14, 0.17)] * 15  # ~2x area swings, within the ratio
+    clusters = faces._cluster_faces([[(0.4, 0.5, w, h)] for w, h in sizes])
+
+    assert len(clusters) == 1
+
+
+def test_track_from_cluster_carries_its_own_position_forward():
+    cluster = faces._FaceCluster()
+    cluster.add(0, (0.1, 0.5, 0.1, 0.12))
+    cluster.add(5, (0.2, 0.5, 0.1, 0.12))
+
+    points = faces._track_from_cluster(cluster, total_frames=8, sample_fps=6.0)
+
+    assert len(points) == 8
+    assert points[0].x == pytest.approx(0.15)
+    assert points[4].x == pytest.approx(0.15)  # carried forward, not the frame centre
+    assert points[5].x == pytest.approx(0.25)
+
+
+def test_track_from_cluster_is_centred_before_its_first_detection():
+    cluster = faces._FaceCluster()
+    cluster.add(3, (0.6, 0.4, 0.1, 0.12))
+
+    points = faces._track_from_cluster(cluster, total_frames=5, sample_fps=6.0)
+
+    assert points[0].x == pytest.approx(0.5) and points[0].width == 0.0
+    assert points[3].x == pytest.approx(0.65)
+
+
+def test_face_track_picks_the_persistent_face_over_a_larger_transient_one(monkeypatch):
+    """The clip-wide vote is what stops one oversized detection hijacking the crop."""
+    monkeypatch.setattr(faces, "sample_gray_frames", lambda *a, **k: _fake_frames(40))
+    small = (0.1, 0.5, 0.1, 0.12)  # the facecam, seen in every frame
+    huge = (0.5, 0.4, 0.45, 0.5)  # a bigger face in the first three frames only
+    monkeypatch.setattr(
+        faces, "detect_faces", _detector_per_frame(lambda i: [small, huge] if i < 3 else [small])
+    )
+
+    points = faces.face_track(Path("whatever.mp4"), duration_seconds=7.0, sample_fps=6.0)
+
+    assert len(points) == 40
+    assert all(point.x == pytest.approx(0.15) for point in points)
+    assert all(point.width == pytest.approx(0.1) for point in points)
+
+
+def test_face_track_stays_on_one_face_when_two_alternate(monkeypatch):
+    """Two similar faces must not average into a crop that sits between them."""
+    monkeypatch.setattr(faces, "sample_gray_frames", lambda *a, **k: _fake_frames(40))
+    big = (0.1, 0.5, 0.12, 0.14)  # marginally larger, so the tie is decided, not random
+    small = (0.8, 0.5, 0.1, 0.12)
+    monkeypatch.setattr(
+        faces, "detect_faces", _detector_per_frame(lambda i: [big] if i % 2 == 0 else [small])
+    )
+
+    points = faces.face_track(Path("whatever.mp4"), duration_seconds=7.0, sample_fps=6.0)
+
+    assert all(point.x == pytest.approx(0.16) for point in points)  # the bigger face's centre
+
+
+def test_face_track_rejects_a_face_that_only_flashes_by(monkeypatch):
+    monkeypatch.setattr(faces, "sample_gray_frames", lambda *a, **k: _fake_frames(100))
+    box = (0.1, 0.5, 0.1, 0.12)
+    monkeypatch.setattr(
+        faces, "detect_faces", _detector_per_frame(lambda i: [box] if i < 10 else [])
+    )
+
+    points = faces.face_track(Path("whatever.mp4"), duration_seconds=17.0, sample_fps=6.0)
+
+    # Seen in 10% of frames, below the 20% floor: no usable face, so motion takes over.
+    assert points == []
+
 

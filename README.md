@@ -161,7 +161,8 @@ multiplier, audio spike multiplier, `disk_budget_gb`, `asr_model`, `caption_mode
 `caption_max_per_run`, `caption_max_chat_messages`, `openai_base_url`.
 
 Editing knobs: `clip_target_width`/`clip_target_height`/`clip_fps`, `layout_strategy`,
-`layout_track_backend`, `layout_smoothing`, `quality_warn_upscale`, `render_crf`, `render_preset`,
+`layout_track_backend`, `layout_smoothing`, `facecam_box` (an `"x,y,w,h"` box, or `auto` to derive
+it from the face track), `facecam_pad`, `quality_warn_upscale`, `render_crf`, `render_preset`,
 `caption_style`, `caption_emphasis`, `caption_*` sizing knobs, `deadair_*`,
 `audio_normalize`/`audio_target_lufs`/`audio_true_peak`/`audio_limiter`, `metadata_enabled`,
 `metadata_title_max_chars`, `metadata_max_hashtags`, `thumbnail_enabled`, `thumbnail_overlay_text`.

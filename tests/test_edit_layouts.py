@@ -8,6 +8,8 @@ import pytest
 from clippy.config import Settings
 from clippy.edit.layouts import (
     WARN_CAPTION_BAND,
+    WARN_FACECAM_AUTO_FAILED,
+    WARN_FACECAM_DERIVED,
     WARN_FACECAM_MISSING,
     WARN_LOW_RES,
     WARN_TRACK_FALLBACK,
@@ -18,6 +20,7 @@ from clippy.edit.layouts import (
     caption_band_coverage,
     caption_bands,
     crop_rect,
+    facecam_box_from_track,
     plan_layout,
     resolve_strategy,
     segments_from_track,
@@ -52,6 +55,7 @@ def _plan(
     source=(1920, 1080),
     track=(),
     facecam_box=None,
+    facecam_box_auto=False,
     crop_bias=0.0,
     zoom=1.0,
     **overrides,
@@ -68,6 +72,7 @@ def _plan(
         settings=settings,
         track=list(track),
         facecam_box=facecam_box,
+        facecam_box_auto=facecam_box_auto,
         crop_bias=crop_bias,
         zoom=zoom,
     )
@@ -453,6 +458,155 @@ def test_plan_layout_measures_the_band_with_the_chosen_style(tmp_path: Path):
     assert build("karaoke_highlight").caption_bottom_coverage == pytest.approx(1.0)
     assert build("block_pop").caption_bottom_coverage == pytest.approx(1.0)
     assert build("minimal").caption_bottom_coverage == 0.0
+
+
+def _face_track(count=6, centre=(0.75, 0.2), size=(0.12, 0.16)):
+    """A canned face backend track: real boxes, all in the same spot."""
+    return [
+        TrackPoint(t=index * 0.5, x=centre[0], y=centre[1], width=size[0], height=size[1])
+        for index in range(count)
+    ]
+
+
+def test_parsed_facecam_box_treats_auto_as_no_explicit_box(tmp_path: Path):
+    auto = _settings(tmp_path, facecam_box="auto")
+    assert auto.facecam_box_is_auto() is True
+    assert auto.parsed_facecam_box() is None
+
+    explicit = _settings(tmp_path, facecam_box="0.7,0.05,0.28,0.3")
+    assert explicit.facecam_box_is_auto() is False
+    assert explicit.parsed_facecam_box() == pytest.approx((0.7, 0.05, 0.28, 0.3))
+
+    assert _settings(tmp_path, facecam_box="").parsed_facecam_box() is None
+
+
+def test_facecam_box_from_track_grows_the_face_and_snaps_to_its_corner():
+    box = facecam_box_from_track(_face_track(), source_width=1920, source_height=1080)
+
+    assert box is not None
+    x, y, w, h = box
+    # Median face is 0.12 x 0.16, grown by the default 1.6x pad.
+    assert w == pytest.approx(0.192)
+    assert h == pytest.approx(0.256)
+    # The face sits in the top-right, so the box is flush to that corner.
+    assert x == pytest.approx(1.0 - w)
+    assert y == pytest.approx(0.0)
+
+
+def test_facecam_box_from_track_snaps_each_axis_only_when_the_face_is_off_centre():
+    """A face near the midline keeps that axis' median instead of being dragged to an edge."""
+    box = facecam_box_from_track(
+        _face_track(centre=(0.48, 0.2)), source_width=1920, source_height=1080
+    )
+
+    assert box is not None
+    x, y, w, h = box
+    # x is only 0.02 from the midline, so it stays centred on the face...
+    assert x + w / 2.0 == pytest.approx(0.48)
+    # ...while y is clearly high in the frame, so it snaps to the top edge.
+    assert y == pytest.approx(0.0)
+
+
+def test_facecam_box_from_track_uses_the_median_not_a_stray():
+    track = _face_track(count=5)
+    track[2] = TrackPoint(t=1.0, x=0.1, y=0.1, width=0.12, height=0.16)
+
+    box = facecam_box_from_track(track, source_width=1920, source_height=1080)
+
+    # Four of five frames are top-right, so one stray detection cannot drag the box left.
+    assert box is not None
+    assert box[0] == pytest.approx(1.0 - box[2])
+
+
+def test_facecam_box_from_track_keeps_the_median_when_the_face_is_centred():
+    box = facecam_box_from_track(
+        _face_track(centre=(0.5, 0.5)), source_width=1920, source_height=1080
+    )
+
+    assert box is not None
+    x, y, w, h = box
+    # No corner majority, so the box stays centred on the face rather than being snapped away.
+    assert x + w / 2.0 == pytest.approx(0.5)
+    assert y + h / 2.0 == pytest.approx(0.5)
+
+
+def test_facecam_box_from_track_rejects_motion_tracks_and_too_few_faces():
+    # Motion points carry no box (`width`/`height` are 0), so there is nothing to derive from.
+    motion = [TrackPoint(t=index * 0.5, x=0.5, y=0.5) for index in range(10)]
+    assert facecam_box_from_track(motion, source_width=1920, source_height=1080) is None
+    # Too few detections to trust.
+    assert (
+        facecam_box_from_track(_face_track(count=2), source_width=1920, source_height=1080)
+        is None
+    )
+    assert facecam_box_from_track([], source_width=1920, source_height=1080) is None
+
+
+def test_facecam_box_from_track_clamps_to_the_frame():
+    box = facecam_box_from_track(
+        _face_track(centre=(0.98, 0.98), size=(0.2, 0.2)),
+        source_width=1920,
+        source_height=1080,
+    )
+
+    assert box is not None
+    x, y, w, h = box
+    assert x >= 0.0 and y >= 0.0
+    assert x + w <= 1.0 + 1e-9
+    assert y + h <= 1.0 + 1e-9
+
+
+def test_plan_layout_auto_with_a_derived_box_resolves_gaming(tmp_path: Path):
+    derived = facecam_box_from_track(
+        _face_track(), source_width=1920, source_height=1080
+    )
+    assert derived is not None
+
+    _, plan = _plan(
+        tmp_path, requested="auto", facecam_box=derived, facecam_box_auto=True
+    )
+
+    assert plan.resolved_strategy == "gaming"
+    assert len(plan.segments[0].layers) == 2
+    assert plan.caption_prefer_top is True
+    assert WARN_FACECAM_DERIVED in plan.warnings
+    # The box that was actually used is recorded, as fractions, with its provenance.
+    assert plan.facecam_box_source == "auto"
+    assert plan.facecam_box == pytest.approx(derived)
+
+
+def test_plan_layout_gaming_with_auto_and_no_face_falls_back(tmp_path: Path):
+    _, plan = _plan(
+        tmp_path, requested="gaming", facecam_box=None, facecam_box_auto=True
+    )
+
+    assert plan.resolved_strategy == "fit_blur"
+    assert WARN_FACECAM_MISSING in plan.warnings
+    assert WARN_FACECAM_AUTO_FAILED in plan.warnings
+    assert plan.facecam_box is None
+    assert plan.facecam_box_source == ""
+
+
+def test_plan_layout_auto_without_a_face_falls_back_to_irl_and_warns(tmp_path: Path):
+    # A boxless `auto` does not become `gaming`; it degrades to the next honest strategy, and the
+    # plan still says the derivation was attempted and failed.
+    _, plan = _plan(
+        tmp_path, requested="auto", facecam_box=None, facecam_box_auto=True
+    )
+
+    assert plan.resolved_strategy == "irl"
+    assert WARN_FACECAM_AUTO_FAILED in plan.warnings
+    assert plan.facecam_box is None
+    assert plan.facecam_box_source == ""
+
+
+def test_plan_layout_config_box_is_recorded_as_config(tmp_path: Path):
+    _, plan = _plan(tmp_path, requested="gaming", facecam_box=[0.7, 0.05, 0.28, 0.3])
+
+    assert plan.resolved_strategy == "gaming"
+    assert plan.facecam_box == pytest.approx((0.7, 0.05, 0.28, 0.3))
+    assert plan.facecam_box_source == "config"
+    assert WARN_FACECAM_DERIVED not in plan.warnings
 
 
 def test_caption_band_coverage_maps_motion_through_the_layout():

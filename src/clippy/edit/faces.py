@@ -11,19 +11,26 @@ Everything here is deliberately defensive:
   suite stays runnable - on a machine without OpenCV.
 - Detection runs on small grayscale frames sampled at a low rate, because the answer only has to
   be good enough to bias a crop and to choose which caption band to avoid.
-- A clip where the face was seen in fewer than `min_hit_ratio` of sampled frames is rejected
-  outright (`face_track` returns ``[]``), so a busy background or one lucky hit can never steer
-  the framing. The caller then falls back to motion.
+- A clip whose chosen face appears in fewer than `min_hit_ratio` of the sampled frames is rejected
+  outright (`face_track` returns ``[]``), so a busy background or one lucky hit can never steer the
+  framing. The caller then falls back to motion.
 
-Frames where the face is not detected carry the previous position forward, so downstream segment
-logic sees a dense, calm track rather than a sparse, jumpy one.
+Detections are grouped into spatial clusters across the whole clip, and the cluster that behaves
+like a webcam - one face, seen consistently, at a stable spot - is chosen. A per-frame greedy pick
+lets a single oversized or one-frame detection hijack the crop; the vote over the clip is what
+stops a game character, an on-screen poster or a second person steering the framing.
+
+Frames where the chosen face is not detected carry its previous position forward, so downstream
+segment logic sees a dense, calm track rather than a sparse, jumpy one.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import shutil
 import subprocess
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
@@ -40,7 +47,59 @@ MIN_NEIGHBORS = 5
 MIN_SIZE_RATIO = 0.06
 MIN_HIT_RATIO = 0.2
 
+# Clustering constants. A detection joins a cluster when its centre is within `CLUSTER_MAX_JUMP`
+# of that cluster's centre (a face cannot teleport between samples), and when its area is within
+# `CLUSTER_SIZE_RATIO` of the cluster's median - so a much bigger box (poster, cutscene, thumbnail)
+# starts its own cluster and has to earn the vote instead of merging into the real face.
+CLUSTER_MAX_JUMP = 0.15
+CLUSTER_SIZE_RATIO = 2.5
+
 FaceBox = tuple[float, float, float, float]  # x, y, w, h as fractions of the frame
+
+
+def _area(box: FaceBox) -> float:
+    return box[2] * box[3]
+
+
+def _center(box: FaceBox) -> tuple[float, float]:
+    return (box[0] + box[2] / 2.0, box[1] + box[3] / 2.0)
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+@dataclass
+class _FaceCluster:
+    """One candidate face: the detections that plausibly belong to it, by sampled-frame index."""
+
+    by_frame: dict[int, FaceBox] = field(default_factory=dict)
+    # The most recently added box. Association compares against this rather than the median, so a
+    # face that drifts slowly keeps chaining into the same cluster instead of fragmenting.
+    last: FaceBox | None = field(default=None, repr=False)
+
+    def add(self, frame_index: int, box: FaceBox) -> None:
+        self.by_frame[frame_index] = box
+        self.last = box
+
+    @property
+    def center(self) -> tuple[float, float]:
+        xs = sorted(_center(box)[0] for box in self.by_frame.values())
+        ys = sorted(_center(box)[1] for box in self.by_frame.values())
+        return (_median(xs), _median(ys))
+
+    @property
+    def median_area(self) -> float:
+        return _median([_area(box) for box in self.by_frame.values()])
+
+    def persistence(self, total_frames: int) -> float:
+        return len(self.by_frame) / max(1, total_frames)
 
 
 def available() -> bool:
@@ -202,30 +261,91 @@ def detect_faces(
     return [(x / width, y / height, w / width, h / height) for x, y, w, h in boxes]
 
 
-def pick_face(
-    boxes: Sequence[FaceBox],
+def _cluster_faces(
+    boxes_per_frame: Sequence[Sequence[FaceBox]],
     *,
-    previous: FaceBox | None = None,
-) -> FaceBox | None:
+    max_jump: float = CLUSTER_MAX_JUMP,
+    size_ratio: float = CLUSTER_SIZE_RATIO,
+) -> list[_FaceCluster]:
     """
-    Choose the face to follow: the largest, with a nudge toward the previous one.
+    Group per-frame detections into candidate faces (pure).
 
-    Largest-first is the right prior for a facecam (it is the biggest face on screen), and the
-    proximity nudge stops the choice flickering between two similar-sized faces.
+    Boxes are walked largest-first so a bigger face claims its cluster before a smaller one nearby
+    can. A box joins the nearest cluster that is close enough to that cluster's **most recent** box
+    (centre within `max_jump`) and similar enough in size (`size_ratio`), otherwise it starts a new
+    cluster - so a game character, an on-screen image or a second person becomes a separate
+    candidate rather than polluting the webcam. Comparing against the most recent box (not the
+    cluster's median) is what keeps a slowly drifting face as one cluster instead of splitting it
+    into several half-persistent fragments. Ties are broken deterministically by frame order, so the
+    same clip always clusters the same way (which keeps the composition cache stable).
     """
-    if not boxes:
-        return None
+    clusters: list[_FaceCluster] = []
+    for frame_index, boxes in enumerate(boxes_per_frame):
+        for box in sorted(boxes, key=_area, reverse=True):
+            cx, cy = _center(box)
+            area = _area(box)
+            best: _FaceCluster | None = None
+            best_distance = float("inf")
+            for cluster in clusters:
+                if cluster.last is None:
+                    continue
+                # Size is compared against the cluster's most recent box, so a face whose detected
+                # box jitters or drifts in size stays connected, while a sudden poster-sized box is
+                # still refused.
+                last_area = _area(cluster.last)
+                if last_area > 0 and not (
+                    last_area / size_ratio <= area <= last_area * size_ratio
+                ):
+                    continue
+                last_x, last_y = _center(cluster.last)
+                distance = math.hypot(cx - last_x, cy - last_y)
+                if distance <= max_jump and distance < best_distance:
+                    best, best_distance = cluster, distance
+            if best is None:
+                best = _FaceCluster()
+                clusters.append(best)
+            # Boxes are visited largest-first, so when two in one frame claim the same cluster the
+            # bigger one keeps it; the smaller is dropped rather than overwriting it.
+            if frame_index not in best.by_frame:
+                best.add(frame_index, box)
+    return clusters
 
-    def score(box: FaceBox) -> float:
-        x, y, w, h = box
-        area = w * h
-        if previous is None:
-            return area
-        px, py, pw, ph = previous
-        distance = abs((x + w / 2) - (px + pw / 2)) + abs((y + h / 2) - (py + ph / 2))
-        return area / (1.0 + distance)
 
-    return max(boxes, key=score)
+def _track_from_cluster(
+    cluster: _FaceCluster,
+    *,
+    total_frames: int,
+    sample_fps: float,
+) -> list[TrackPoint]:
+    """
+    Replay one cluster across every sampled frame, carrying its last position forward.
+
+    Only the chosen cluster's detections move the track, so the frames it missed - and any other
+    face seen in those frames - cannot drag it. Before its first detection the track sits at the
+    frame centre with an unknown box, exactly as the motion fallback would.
+    """
+    step = 1.0 / max(sample_fps, 1e-6)
+    points: list[TrackPoint] = []
+    last: FaceBox | None = None
+    for index in range(total_frames):
+        box = cluster.by_frame.get(index)
+        if box is not None:
+            last = box
+        if last is None:
+            centre_x, centre_y, width, height = 0.5, 0.5, 0.0, 0.0
+        else:
+            centre_x, centre_y = _center(last)
+            width, height = last[2], last[3]
+        points.append(
+            TrackPoint(
+                t=(index + 0.5) * step,
+                x=min(max(centre_x, 0.0), 1.0),
+                y=min(max(centre_y, 0.0), 1.0),
+                width=width,
+                height=height,
+            )
+        )
+    return points
 
 
 def face_track(
@@ -243,12 +363,17 @@ def face_track(
     ffprobe_path: str = "ffprobe",
 ) -> list[TrackPoint]:
     """
-    Follow the largest face across a clip, or return ``[]`` when there is no usable face.
+    Follow the clip's most webcam-like face, or return ``[]`` when there is no usable face.
 
-    One point per sampled frame: the detected centre when there is a detection, otherwise the
-    previous position carried forward (and the frame centre before the first detection). The box
-    size is carried too, so the caption stage can test the real face rectangle against the
-    caption band instead of assuming a subject height.
+    Every sampled frame is detected once, then the detections are clustered across the whole clip
+    and the most persistent, size-consistent face wins. One point per sampled frame: the winning
+    cluster's centre when it has a detection, otherwise its previous position carried forward (and
+    the frame centre before its first detection). The box size is carried too, so the caption stage
+    can test the real face rectangle against the caption band instead of assuming a subject height.
+
+    A clip whose best face appears in fewer than `min_hit_ratio` of frames is rejected, so a busy
+    background - or a face that merely flashes past - cannot steer the framing; the caller then
+    falls back to motion.
     """
     frames = sample_gray_frames(
         media_path,
@@ -259,60 +384,55 @@ def face_track(
         ffmpeg_path=ffmpeg_path,
         ffprobe_path=ffprobe_path,
     )
-    if frames.shape[0] == 0:
+    total = int(frames.shape[0])
+    if total == 0:
         return []
 
-    boxes: list[FaceBox | None] = []
-    previous: FaceBox | None = None
-    for frame in frames:
-        found = pick_face(
-            detect_faces(
-                frame,
-                scale_factor=scale_factor,
-                min_neighbors=min_neighbors,
-                min_size_ratio=min_size_ratio,
-            ),
-            previous=previous,
+    boxes_per_frame = [
+        detect_faces(
+            frame,
+            scale_factor=scale_factor,
+            min_neighbors=min_neighbors,
+            min_size_ratio=min_size_ratio,
         )
-        if found is not None:
-            previous = found
-        boxes.append(found)
-
-    hits = sum(1 for box in boxes if box is not None)
-    hit_ratio = hits / len(boxes)
-    threshold = max(0.0, float(min_hit_ratio))
-    if hit_ratio < threshold:
+        for frame in frames
+    ]
+    clusters = _cluster_faces(boxes_per_frame)
+    if not clusters:
         logger.info(
-            "Face track rejected for %s: seen in %.0f%% of frames (< %.0f%%)",
+            "No face detected anywhere in %s; the caller keeps motion tracking",
             media_path.name,
-            hit_ratio * 100,
+        )
+        return []
+
+    ranked = sorted(
+        clusters, key=lambda cluster: (cluster.persistence(total), cluster.median_area), reverse=True
+    )
+    winner = ranked[0]
+    persistence = winner.persistence(total)
+    threshold = max(0.0, float(min_hit_ratio))
+    if persistence < threshold:
+        logger.info(
+            "Face track rejected for %s: best face seen in %.0f%% of frames (< %.0f%%)",
+            media_path.name,
+            persistence * 100,
             threshold * 100,
         )
         return []
 
-    step = 1.0 / max(sample_fps, 1e-6)
-    points: list[TrackPoint] = []
-    last: FaceBox | None = None
-    for index, box in enumerate(boxes):
-        if box is not None:
-            last = box
-        centre = (last[0] + last[2] / 2.0, last[1] + last[3] / 2.0) if last else (0.5, 0.5)
-        points.append(
-            TrackPoint(
-                t=(index + 0.5) * step,
-                x=min(max(centre[0], 0.0), 1.0),
-                y=min(max(centre[1], 0.0), 1.0),
-                width=last[2] if last else 0.0,
-                height=last[3] if last else 0.0,
-            )
-        )
+    runner_up = ranked[1].persistence(total) if len(ranked) > 1 else 0.0
     logger.info(
-        "Face track for %s: %d/%d frames (%.0f%%)",
+        "Face track for %s: chose 1 of %d candidate face(s), seen in %d/%d frames (%.0f%%), "
+        "next best %.0f%%, centre (%.2f, %.2f)",
         media_path.name,
-        hits,
-        len(boxes),
-        hit_ratio * 100,
+        len(clusters),
+        len(winner.by_frame),
+        total,
+        persistence * 100,
+        runner_up * 100,
+        winner.center[0],
+        winner.center[1],
     )
-    return points
+    return _track_from_cluster(winner, total_frames=total, sample_fps=sample_fps)
 
 

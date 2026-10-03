@@ -740,13 +740,13 @@ and that is what the strategy picks:
 | --- | --- | --- | --- |
 | `fit_blur` | the whole frame scaled to fit width, with a blurred, cropped copy of the same frame filling the rest | none; the honest answer for low-resolution footage | blurred background + fitted video |
 | `irl` | a tracked `source_h x 9/16` crop, subject held near centre, pan smoothed, zoom clamped | needs `min(width, height) >= 720` (`MIN_TRACKED_SOURCE_HEIGHT`) | one crop layer per tracked span |
-| `gaming` | gameplay crop on top with the facecam in the panel below (gameplay occupies `0,0,1080,1152`, i.e. the top 60%) | a `facecam_box`, or the persistent-corner heuristic | gameplay + facecam layers |
+| `gaming` | gameplay crop on top with the facecam in the panel below (gameplay occupies `0,0,1080,1152`, i.e. the top 60%) | a `facecam_box` (typed or `auto`-derived from the face track) | gameplay + facecam layers |
 | `conversation` | splits the frame into two panels instead of tracking who is speaking | two stable motion regions | two panel layers |
 | `auto` | chooses from evidence, then never resolves at plan time | - | whatever it chose |
 
 `auto` is resolved during composition by `resolve_strategy()`, in this order:
 
-1. a configured `facecam_box` → `gaming`
+1. a configured or derived `facecam_box` → `gaming`
 2. otherwise `min(source_width, source_height) >= 720` → `irl`
 3. otherwise `fit_blur`
 
@@ -756,6 +756,8 @@ then these downgrades and warnings apply, all recorded on the plan rather than a
 | --- | --- | --- |
 | `irl` or `conversation` with `source_height < 720` | forced to `fit_blur` | `low_resolution_layout` |
 | `gaming` with no facecam box | forced to `fit_blur` | `facecam_box_missing` |
+| `facecam_box: auto` produced a box | box kept, warning added | `facecam_box_auto` |
+| `facecam_box: auto` produced no box | box `None`; `gaming` degrades to `irl`/`fit_blur` | `facecam_box_auto_failed` |
 | `irl` or `conversation` with `layout_track_backend: none` | strategy kept, but nothing tracks | `tracking_unavailable` |
 | resolved `upscale_factor > quality_warn_upscale` (2.0) | strategy kept, warning added | `upscale_exceeds_threshold` |
 
@@ -770,9 +772,24 @@ Supporting knobs, all of which only matter once a crop strategy is chosen:
 | --- | --- | --- |
 | `layout_track_backend` | `motion` | `none` disables tracking (and warns), which also leaves the caption band where it is because there is no evidence; `motion` uses a numpy motion map; `opencv` uses the bundled Haar face cascade for both a subject box and a vertical position (see below); `mediapipe` is accepted but not implemented and falls back to motion |
 | `layout_smoothing` | `0.12` | crop-pan responsiveness; `1.0` is unsmoothed and visibly twitchy |
-| `facecam_box` | `""` | `"x,y,w,h"`; fractions when the values are `<= 1`, else pixels |
+| `facecam_box` | `""` | `"x,y,w,h"` (fractions when the values are `<= 1`, else pixels), or `auto` to derive it from the face track |
+| `facecam_pad` | `1.6` | headroom grown around the derived face before it becomes the panel's source rectangle (`auto` only) |
 | `layout_zoom` | `1.0` | tightens the tracked crop around the subject (above `1.0` the crop shrinks, so it upscales more); `irl` only |
 | `crop_bias` | `0.0` | horizontal nudge (normalised) for a mis-framed `irl` crop; override-only, so there is no config key - set it through `EditOverrides` |
+
+**Deriving the facecam box (`facecam_box: auto`).** A hand-typed box is the reliable path, but it
+needs coordinates the streamer may not know. `auto` derives one from the clip's own face track:
+`facecam_box_from_track()` (pure, in `edit/layouts.py`) takes the tracked face boxes, uses the
+**median** centre and size (so one stray detection cannot drag it), grows the box by `facecam_pad`,
+and snaps it flush to the corner the face occupies for most of the clip (a face on the midline
+keeps its median position instead of being snapped). It is resolved in `plan_composition` - the
+first place a face track exists - and then travels the exact same `facecam_box` path a typed box
+does, `gaming` and all. It needs real face boxes, so it requires `layout_track_backend: opencv`;
+with the motion backend the track carries no box, so `auto` warns (`facecam_box_auto_failed`) and
+the layout degrades to `irl`/`fit_blur`. The box that was used is written back to `plan.json` as
+fractions with a `facecam_box_source` of `config` or `auto`, which also makes a re-render reuse the
+same box instead of deriving a new one.
+
 
 Two internal constants shape the look and are not configurable: a crop only moves when the
 subject moves beyond `TRACK_DEADBAND` (0.02), and one clip is capped at `MAX_TRACK_SEGMENTS`
@@ -787,21 +804,33 @@ to position the crop - without detection, a vertical crop would chase noise - bu
 evidence behind `caption_safe_area: auto` ([Caption band](#caption-band-caption_safe_area)), which
 only needs to know which slice of the canvas the motion occupies across the whole clip.
 
-**The face backend** (`layout_track_backend: opencv`, in `edit/faces.py`) follows the largest face and reports a real
-box, which feeds two things: the vertical crop position and the caption band test. It is
-deliberately gated rather than trusted: detection runs on small grayscale frames
-(`face_detection_width`), ignores anything smaller than `face_min_size_ratio` of the frame, prefers
-the previously-followed face when two are a similar size, and is discarded entirely unless the face
-was seen in at least `face_min_hit_ratio` of sampled frames - at which point the clip falls back to
-motion. Frames without a detection carry the previous position forward, so the track stays dense and
-the layout stays calm. OpenCV is imported lazily, so nothing else in the package needs it, and a
-detector failure is logged and degraded rather than fatal.
+**The face backend** (`layout_track_backend: opencv`, in `edit/faces.py`) reports a real face box,
+which feeds two things: the vertical crop position and the caption band test. It is deliberately
+gated rather than trusted: detection runs on small grayscale frames (`face_detection_width`) and
+ignores anything smaller than `face_min_size_ratio` of the frame.
+
+Detections are then **clustered across the whole clip** and voted on, because a per-frame greedy
+pick lets one oversized or one-frame detection hijack the crop. Each detection joins the nearest
+cluster whose **most recent** box is close enough (centre within `CLUSTER_MAX_JUMP`, 0.15 of the
+frame) and similar enough in size (area within `CLUSTER_SIZE_RATIO`, 2.5x of that box) - otherwise it
+starts its own cluster, so a game character, an on-screen poster/thumbnail or a second person becomes
+a separate candidate. Comparing against the most recent box (rather than the cluster's median) is
+what keeps a face that slowly drifts or whose detected size jitters as one cluster instead of
+splitting it into half-persistent fragments. The winner is the cluster with the best
+`(persistence, median area)`, and it is rejected entirely unless it is seen in at least
+`face_min_hit_ratio` of sampled frames - at which point the clip falls back to motion. Only the
+winning cluster's detections move the track; the frames it missed carry its last position forward, so
+the track stays dense and the layout stays calm. Each `face_track` call logs the number of candidate
+faces, the winner's persistence and the runner-up, so a shaky pick is visible.
+
+OpenCV is imported lazily, so nothing else in the package needs it, and a detector failure is logged
+and degraded rather than fatal.
 
 | key | default | effect |
 | --- | --- | --- |
 | `face_detection_width` | `480` | width of the grayscale frames the cascade sees: a speed/accuracy tradeoff |
 | `face_min_size_ratio` | `0.06` | smallest face worth believing, as a fraction of the frame |
-| `face_min_hit_ratio` | `0.2` | below this share of sampled frames the whole track is rejected and motion takes over |
+| `face_min_hit_ratio` | `0.2` | below this share of sampled frames the **chosen** face is rejected and motion takes over |
 
 ---
 
@@ -1181,7 +1210,7 @@ example config is not identical to a bare `Settings()`.
 | `layout_strategy` / `layout_track_backend` | `auto` / `motion` | how the frame is reframed, and what drives the crop |
 | `layout_smoothing` / `layout_zoom` | `0.12` / `1.0` | crop-pan responsiveness, and the zoom clamp |
 | `facecam_box` | `""` | `"x,y,w,h"`; fractions when the values are `<= 1`, else pixels |
-| `face_detection_width` / `face_min_size_ratio` / `face_min_hit_ratio` | `480` / `0.06` / `0.2` | face backend only: the frame size the cascade sees, the smallest believable face, and the hit ratio below which the whole track is discarded |
+| `face_detection_width` / `face_min_size_ratio` / `face_min_hit_ratio` | `480` / `0.06` / `0.2` | face backend only: the frame size the cascade sees, the smallest believable face, and the share of frames the chosen (most persistent) face must appear in before it is trusted |
 | `quality_warn_upscale` | `2.0` | upscale factor above which a plan carries `upscale_exceeds_threshold` |
 | `render_crf` / `intermediate_crf` / `render_preset` | `20` / `16` / `veryfast` | encode quality of the deliverable, of the intermediates, and the x264 speed/size preset |
 | `render_encoder` | `auto` | `auto`, `x264` or `nvenc` |
@@ -1253,7 +1282,7 @@ stated reason, so the next person can judge whether the tradeoff still holds.
 | editing | A UI re-render with the selects left empty re-plans layout and captions from `config.yaml`, not from the values already in `plan.json` | Boundaries are preserved on purpose, so the clip still starts where the reviewer saw it, and the option labels say "config default" instead of implying the current choice is kept | Preselect `plan.layout.strategy` / `plan.captions.style` in the form, or let an unset override inherit from the same-source plan |
 | editing | Review re-render is synchronous | One clip takes seconds, and a reviewer expects to wait | A job queue |
 | editing | Vertical framing is inert on a 16:9 capture | A 9:16 crop of a 16:9 frame already uses the whole height, so there is no headroom to move within: the tracked vertical position changes framing only for sources taller than 9:16, though it always informs the caption band | A taller source, or a crop that zooms in far enough to create headroom |
-| editing | Face detection is frontal-only and opt-in | `layout_track_backend: opencv` uses the cascade bundled with the wheel, so it needs no model download and never runs unless asked; it misses profile faces and can be fooled by face-like patterns, which is why a clip below `face_min_hit_ratio` falls back to motion instead | A DNN detector (OpenCV 5's `FaceDetectorYN` with a downloaded model, or mediapipe) behind the same seam, which would also remove the opt-in |
+| editing | Face detection is frontal-only and opt-in | `layout_track_backend: opencv` uses the cascade bundled with the wheel, so it needs no model download and never runs unless asked; it misses profile faces and can be fooled by face-like patterns. The clip-wide clustering vote (see [Layout strategies](#layout-strategies-layout_strategy)) rejects faces seen in fewer than `face_min_hit_ratio` of frames, so a hallucinated or transient face has to beat the real one across the whole clip rather than win a single frame | A DNN detector (OpenCV 5's `FaceDetectorYN` with a downloaded model, or mediapipe) behind the same seam, which would also remove the opt-in |
 
 These seams are all additive. A new signal module only has to return event objects with `ts`,
 `kind`, `score`, and `details`; `combine_signal_events` and the storage layer already accept

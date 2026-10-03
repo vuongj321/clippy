@@ -30,7 +30,10 @@ from clippy.edit.plan import DeadAirPlan, EditPaths, EditPlan
 from clippy.edit.layouts import (
     BLUR_SIGMA,
     WARN_CAPTION_BAND,
+    WARN_FACECAM_AUTO_FAILED,
+    WARN_FACECAM_DERIVED,
     CompositionPlan,
+    facecam_box_from_track,
     plan_layout,
 )
 from clippy.edit.plan import WARN_LAYOUT_PENDING
@@ -444,6 +447,21 @@ def plan_composition(
     # `override or settings` once, so `plan.layout` already holds the strategy, size, bias and zoom
     # that were asked for; reading them back here is what makes a CLI/UI override reach the render
     # instead of being silently replaced by the config default.
+    #
+    # `facecam_box: auto` is resolved here because this is the first place a face track exists: the
+    # box is derived from the clip's own tracked face, then falls through the exact same
+    # `facecam_box` path as a typed one. A failure to derive leaves the box `None`, which the layout
+    # reports as `facecam_box_auto_failed` and settles on `fit_blur`.
+    facecam_box = plan.layout.facecam_box or settings.parsed_facecam_box()
+    facecam_box_auto = False
+    if facecam_box is None and settings.facecam_box_is_auto():
+        facecam_box_auto = True
+        facecam_box = facecam_box_from_track(
+            track,
+            source_width=width,
+            source_height=height,
+            pad=settings.facecam_pad,
+        )
     layout = plan_layout(
         requested=plan.layout.strategy or settings.layout_strategy,
         source_width=width,
@@ -454,7 +472,8 @@ def plan_composition(
         duration=duration,
         settings=settings,
         track=track,
-        facecam_box=plan.layout.facecam_box or settings.parsed_facecam_box(),
+        facecam_box=facecam_box,
+        facecam_box_auto=facecam_box_auto,
         # `build_plan` already folded any style override in, so the caption band is measured
         # against the style that is actually going to be burned in.
         caption_style=plan.captions.style,
@@ -475,6 +494,15 @@ def _record_layout(plan: EditPlan, layout: CompositionPlan, *, settings: Setting
     plan.layout.fps = layout.fps
     plan.layout.upscale_factor = layout.upscale_factor
     plan.layout.track_backend = settings.layout_track_backend
+    # Record the box the layout actually used (fractions of the source frame) and where it came
+    # from. Writing the derived box back is also what keeps a re-render stable: `plan_composition`
+    # reads it back and reuses it instead of deriving a new one.
+    plan.layout.facecam_box = (
+        [round(value, 4) for value in layout.facecam_box]
+        if layout.facecam_box is not None
+        else None
+    )
+    plan.layout.facecam_box_source = layout.facecam_box_source
     plan.layout.layers = [
         layer.to_dict() for segment in layout.segments for layer in segment.layers
     ]
@@ -496,6 +524,20 @@ def _layout_warning_message(code: str, layout: CompositionPlan, *, settings: Set
             "captions moved to the top band: subject motion sits in the bottom band for "
             f"{layout.caption_bottom_coverage:.0%} of frames (caption_avoid_ratio "
             f"{settings.caption_avoid_ratio:.0%})"
+        )
+    if code == WARN_FACECAM_DERIVED:
+        box = layout.facecam_box
+        rendered = (
+            ",".join(f"{value:.3f}" for value in box) if box is not None else "unknown"
+        )
+        return (
+            f"facecam box derived from face tracking ({rendered}); "
+            "set facecam_box explicitly to pin it"
+        )
+    if code == WARN_FACECAM_AUTO_FAILED:
+        return (
+            "facecam_box: auto found no usable face, so the layout fell back to fit_blur; "
+            "this needs layout_track_backend: opencv (and an OpenCV install)"
         )
     return f"layout: {code.replace('_', ' ')}"
 

@@ -163,6 +163,8 @@ class LayoutPlan:
     crop_bias: float = 0.0
     zoom: float = 1.0
     facecam_box: list[float] | None = None
+    # "config" (typed) or "auto" (derived from the face track). Blank when no box was used.
+    facecam_box_source: str = ""
     layers: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -179,6 +181,7 @@ class LayoutPlan:
             "facecam_box": (
                 [_r(v) for v in self.facecam_box] if self.facecam_box is not None else None
             ),
+            "facecam_box_source": self.facecam_box_source,
             "layers": self.layers,
         }
 
@@ -196,6 +199,7 @@ class LayoutPlan:
             crop_bias=float(_value(data, "crop_bias", 0.0)),
             zoom=float(_value(data, "zoom", 1.0)),
             facecam_box=[float(v) for v in box] if isinstance(box, (list, tuple)) else None,
+            facecam_box_source=str(_value(data, "facecam_box_source", "")),
             layers=[layer for layer in _value(data, "layers", []) if isinstance(layer, dict)],
         )
 

@@ -357,7 +357,7 @@ Target `clip_target_width x clip_target_height` = `1080 x 1920` (9:16), `clip_fp
 | -------- | -------- | ----------- |
 | `fit_blur` | full frame scaled to fit, blurred/cropped copy as background fill | works at any resolution; the honest fallback for the 160p fixtures |
 | `irl` | tracked crop of a `source_h x 9/16` region, subject held near center, smoothed pan, zoom clamp | needs >= ~720p to be worth it |
-| `gaming` | gameplay crop plus facecam slot (PiP or stacked), optional dynamic layout switching | `facecam_box` config or a persistent-corner motion heuristic |
+| `gaming` | gameplay crop plus facecam slot (PiP or stacked), optional dynamic layout switching | `facecam_box` config, or `facecam_box: auto` derived from the face track |
 | `conversation` | two-panel split or active-speaker follow from per-region audio energy + motion | needs >= 2 stable motion regions |
 
 - `layout_strategy: auto` chooses from evidence (motion-region count, facecam presence, source
@@ -470,7 +470,7 @@ clippy-edit --candidate 5 --no-captions --keep-intermediate
 | Bounds | `clip_min_seconds`, `clip_max_seconds`, `clip_target_seconds`, `boundary_search_seconds`, `hook_lookback_seconds`, `min_context_seconds`, `reaction_tail_seconds`, `boundary_min_silence_seconds`, `word_gap_min_seconds`, `boundary_llm_refine`, `extract_duration_tolerance_seconds` |
 | Dead air | `deadair_enabled`, `deadair_mode`, `deadair_noise_db`, `deadair_min_gap_seconds`, `deadair_keep_pad_seconds`, `deadair_min_keep_seconds` |
 | Captions | `caption_enabled`, `caption_style`, `caption_font`, `caption_font_size`, `caption_max_chars_per_line`, `caption_max_lines`, `caption_max_cue_seconds`, `caption_min_cue_seconds`, `caption_break_gap_seconds`, `caption_emphasis`, `caption_primary_color`, `caption_highlight_color`, `caption_margin_v`, `caption_safe_area`, `caption_avoid_ratio`, `caption_uppercase`, `asr_provider`, `asr_word_timestamps` |
-| Vertical | `clip_target_width`, `clip_target_height`, `clip_fps`, `layout_strategy`, `layout_track_backend`, `layout_smoothing`, `layout_zoom`, `facecam_box`, `quality_warn_upscale` |
+| Vertical | `clip_target_width`, `clip_target_height`, `clip_fps`, `layout_strategy`, `layout_track_backend`, `layout_smoothing`, `layout_zoom`, `facecam_box`, `facecam_pad`, `quality_warn_upscale` |
 | Render | `render_dir`, `render_crf`, `render_preset`, `render_encoder`, `render_disk_budget_gb`, `edit_max_per_run`, `keep_intermediate` |
 | Audio | `audio_normalize`, `audio_target_lufs`, `audio_true_peak`, `audio_limiter` |
 | Metadata | `metadata_enabled`, `metadata_model`, `metadata_max_hashtags`, `metadata_title_max_chars`, `thumbnail_enabled`, `thumbnail_overlay_text` |

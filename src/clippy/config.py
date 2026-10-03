@@ -118,7 +118,11 @@ class Settings(BaseSettings):
     face_detection_width: int = 480
     face_min_size_ratio: float = 0.06
     face_min_hit_ratio: float = 0.2
+    # `"x,y,w,h"` (fractions of the frame when every value is <= 1, else pixels), blank for no
+    # facecam, or `"auto"` to derive the box from the face track at composition time. `facecam_pad`
+    # is the headroom grown around the detected face before it becomes the panel's source rectangle.
     facecam_box: str = ""
+    facecam_pad: float = 1.6
     quality_warn_upscale: float = 2.0
 
     # --- Phase 2: render + audio ---
@@ -173,10 +177,18 @@ class Settings(BaseSettings):
     def resolved_source_dir(self) -> Path:
         return self.source_dir or (self.data_dir / "source")
 
+    def facecam_box_is_auto(self) -> bool:
+        """`facecam_box: auto` asks for a box derived from the face track at composition time."""
+        return (self.facecam_box or "").strip().lower() == "auto"
+
     def parsed_facecam_box(self) -> tuple[float, float, float, float] | None:
-        """Parse "x,y,w,h". Values are fractions of the source frame when <= 1, else pixels."""
+        """Parse "x,y,w,h". Values are fractions of the source frame when <= 1, else pixels.
+
+        An empty value and the `auto` sentinel both mean "no explicit box"; `auto` is resolved
+        later from the tracked face box, so it must not be parsed as four numbers here.
+        """
         raw = (self.facecam_box or "").strip()
-        if not raw:
+        if not raw or raw.lower() == "auto":
             return None
         parts = [p.strip() for p in raw.split(",")]
         if len(parts) != 4:

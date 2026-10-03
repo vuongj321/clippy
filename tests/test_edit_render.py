@@ -10,8 +10,9 @@ import pytest
 
 from clippy.audio.intensity import probe_duration_seconds
 from clippy.config import Settings
-from clippy.edit.layouts import plan_layout
+from clippy.edit.layouts import WARN_FACECAM_DERIVED, plan_layout
 from clippy.edit.plan import EditPlan, EditPaths, build_plan
+from clippy.edit.track import TrackPoint
 from clippy.edit.render import (
     WARN_EXTRACT_SHORT,
     _cache_is_fresh,
@@ -464,4 +465,60 @@ def test_apply_deadair_copies_base_when_nothing_is_cuttable(tmp_path: Path):
     # The trimmed artifact still exists so later stages have one timeline to read.
     assert paths.trimmed.exists()
     assert paths.trimmed.stat().st_size == paths.base.stat().st_size
+
+
+def test_plan_composition_derives_a_facecam_box_when_asked(monkeypatch, tmp_path: Path):
+    """
+    `facecam_box: auto` is resolved from the clip's own face track, then folds into the same
+    `gaming` path a typed box would - and the derived box is recorded so a reviewer can see it and
+    a re-render reuses it instead of deriving a new one.
+    """
+    _, plan, paths = _plan(tmp_path, ts=120.0)
+    settings = _settings(tmp_path, facecam_box="auto", layout_track_backend="opencv")
+    paths.ensure_root()
+    paths.trimmed.write_bytes(b"trimmed")
+
+    face_track = [
+        TrackPoint(t=index * 0.25, x=0.75, y=0.2, width=0.12, height=0.16)
+        for index in range(8)
+    ]
+    monkeypatch.setattr(
+        "clippy.edit.render.probe_dimensions", lambda *args, **kwargs: (1920, 1080)
+    )
+    monkeypatch.setattr(
+        "clippy.edit.render.track_subject", lambda *args, **kwargs: list(face_track)
+    )
+
+    layout = plan_composition(plan, paths, settings=settings, duration=10.0)
+
+    assert layout.resolved_strategy == "gaming"
+    assert layout.facecam_box_source == "auto"
+    assert layout.facecam_box is not None
+    assert WARN_FACECAM_DERIVED in layout.warnings
+    # Median face 0.12x0.16 grown by 1.6x, snapped to the top-right corner.
+    assert plan.layout.facecam_box == pytest.approx([0.808, 0.0, 0.192, 0.256])
+    assert plan.layout.facecam_box_source == "auto"
+
+
+def test_plan_composition_warns_when_auto_finds_no_face(monkeypatch, tmp_path: Path):
+    _, plan, paths = _plan(tmp_path, ts=120.0)
+    settings = _settings(tmp_path, facecam_box="auto", layout_track_backend="motion")
+    paths.ensure_root()
+    paths.trimmed.write_bytes(b"trimmed")
+
+    monkeypatch.setattr(
+        "clippy.edit.render.probe_dimensions", lambda *args, **kwargs: (1920, 1080)
+    )
+    # A motion track carries no box, so there is nothing to derive from.
+    monkeypatch.setattr(
+        "clippy.edit.render.track_subject",
+        lambda *args, **kwargs: [TrackPoint(t=0.5, x=0.5, y=0.5)],
+    )
+
+    layout = plan_composition(plan, paths, settings=settings, duration=10.0)
+
+    assert layout.resolved_strategy == "irl"
+    assert layout.facecam_box is None
+    assert "facecam_box_auto_failed" in layout.warnings
+    assert plan.layout.facecam_box is None
 

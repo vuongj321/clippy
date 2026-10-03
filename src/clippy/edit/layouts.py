@@ -46,12 +46,26 @@ WARN_LOW_RES = "low_resolution_layout"
 WARN_TRACK_FALLBACK = "tracking_unavailable"
 WARN_UPSCALE = "upscale_exceeds_threshold"
 WARN_CAPTION_BAND = "caption_band_moved"
+WARN_FACECAM_DERIVED = "facecam_box_auto"
+WARN_FACECAM_AUTO_FAILED = "facecam_box_auto_failed"
 
 MIN_TRACKED_SOURCE_HEIGHT = 720
 BLUR_SIGMA = 24
 PANEL_GAP = 8
 TRACK_DEADBAND = 0.02
 MAX_TRACK_SEGMENTS = 24
+
+# Auto facecam derivation, fed by the `opencv` face track's real boxes. A webcam panel needs
+# headroom around the face, so the detected face is grown by `FACECAM_PAD`; the box is the median
+# of the tracked boxes so one stray detection cannot drag it; and a face that sits off-centre
+# toward an edge is snapped flush to that edge so the source crop is stable.
+FACECAM_PAD = 1.6
+FACECAM_MIN_FACE_HITS = 4
+FACECAM_CORNER_MAJORITY = 0.6
+# How far past the midline the face's median centre must sit before an axis is snapped to an edge.
+# A face that is merely *near* the middle is not cornered, and snapping it would drag the panel
+# away from the face entirely.
+FACECAM_CORNER_OFFSET = 0.12
 
 # Caption-band geometry, used only to decide whether a caption would land on the subject.
 # ASS default line spacing is close enough for a strip this size, and the subject is modelled
@@ -141,6 +155,11 @@ class CompositionPlan:
     segments: list[LayoutSegment] = field(default_factory=list)
     caption_prefer_top: bool = False
     caption_bottom_coverage: float = 0.0
+    # The facecam box the layout actually used, as fractions of the source frame, plus where it
+    # came from: "config" (typed) or "auto" (derived from the face track). `None` when no box
+    # was used, which is every non-`gaming` render.
+    facecam_box: tuple[float, float, float, float] | None = None
+    facecam_box_source: str = ""
     subject_track: list[TrackPoint] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -160,6 +179,12 @@ class CompositionPlan:
             "upscale_factor": round(self.upscale_factor, 3),
             "caption_prefer_top": self.caption_prefer_top,
             "caption_bottom_coverage": round(self.caption_bottom_coverage, 4),
+            "facecam_box": (
+                [round(value, 4) for value in self.facecam_box]
+                if self.facecam_box is not None
+                else None
+            ),
+            "facecam_box_source": self.facecam_box_source,
             "segment_count": len(self.segments),
             "segments": [segment.to_dict() for segment in self.segments],
             "track": [
@@ -193,6 +218,8 @@ class CompositionPlan:
             ],
             caption_prefer_top=bool(data.get("caption_prefer_top", False)),
             caption_bottom_coverage=float(data.get("caption_bottom_coverage", 0.0)),
+            facecam_box=_optional_box(data.get("facecam_box")),
+            facecam_box_source=str(data.get("facecam_box_source", "")),
             subject_track=[
                 TrackPoint(
                     t=float(item[0]),
@@ -212,6 +239,13 @@ def clamp(value: float, low: float, high: float) -> float:
     if high < low:
         return low
     return min(max(value, low), high)
+
+
+def _optional_box(values: Any) -> tuple[float, float, float, float] | None:
+    """A stored facecam box as a 4-tuple, or `None` when absent or the wrong length."""
+    if not isinstance(values, (list, tuple)) or len(values) != 4:
+        return None
+    return (float(values[0]), float(values[1]), float(values[2]), float(values[3]))
 
 
 def crop_rect(
@@ -413,6 +447,7 @@ def plan_layout(
     settings: Settings,
     track: Sequence[TrackPoint] = (),
     facecam_box: Sequence[float] | None = None,
+    facecam_box_auto: bool = False,
     caption_style: str = "",
     crop_bias: float = 0.0,
     zoom: float = 1.0,
@@ -423,6 +458,10 @@ def plan_layout(
     `caption_style` is the style that will be burned in (empty means `settings.caption_style`).
     It is needed here because the caption band is measured against the real text height, and
     avoiding that band is what can move the captions to the top.
+
+    `facecam_box_auto` says the box was derived from the face track rather than typed, which only
+    changes the warnings (a reviewer needs to be able to tell the two apart, and to know when an
+    `auto` request found nothing).
 
     Returns segments with static layers, plus the warnings a reviewer needs to judge the
     result: a low-resolution source, a missing facecam box, or a crop that upscales more
@@ -439,6 +478,14 @@ def plan_layout(
     if resolved == STRATEGY_GAMING and facecam is None:
         warnings.append(WARN_FACECAM_MISSING)
         resolved = STRATEGY_FIT
+    if facecam_box_auto and facecam is None:
+        # `auto` was asked for but produced no box. Say so whatever the layout settled on (a
+        # boxless `auto` resolves to `irl`/`fit_blur`, not `gaming`), so a reviewer is not left
+        # wondering why the derived facecam never appeared.
+        warnings.append(WARN_FACECAM_AUTO_FAILED)
+    elif resolved == STRATEGY_GAMING and facecam_box_auto:
+        # The box is only recorded as "auto" when it actually made it into the layout.
+        warnings.append(WARN_FACECAM_DERIVED)
 
     duration = max(0.0, float(duration))
     prefer_top = False
@@ -538,6 +585,23 @@ def plan_layout(
         prefer_top = True
         warnings.append(WARN_CAPTION_BAND)
 
+    # Record the box the layout actually used, as fractions of the source frame. `facecam` is a
+    # pixel rect (the gaming panel crop is built from it), so it is converted back here to keep
+    # `plan.json`/`layout.json` in the same units the config uses. A non-gaming layout used no
+    # box, and says so rather than claiming whatever the config happened to contain.
+    used_box: tuple[float, float, float, float] | None = None
+    box_source = ""
+    if resolved == STRATEGY_GAMING and facecam is not None:
+        scale_x = source_width if source_width > 0 else 1.0
+        scale_y = source_height if source_height > 0 else 1.0
+        used_box = (
+            facecam[0] / scale_x,
+            facecam[1] / scale_y,
+            facecam[2] / scale_x,
+            facecam[3] / scale_y,
+        )
+        box_source = "auto" if facecam_box_auto else "config"
+
     return CompositionPlan(
         strategy=requested,
         resolved_strategy=resolved,
@@ -550,6 +614,8 @@ def plan_layout(
         segments=segments,
         caption_prefer_top=prefer_top,
         caption_bottom_coverage=round(bottom_coverage, 4),
+        facecam_box=used_box,
+        facecam_box_source=box_source,
         subject_track=list(track),
         warnings=warnings,
     )
@@ -570,6 +636,102 @@ def _facecam_rect(
     w = clamp(w, 1.0, max(1.0, source_width - x))
     h = clamp(h, 1.0, max(1.0, source_height - y))
     return (x, y, w, h)
+
+
+def _median(values: Sequence[float]) -> float:
+    """Median of a small sample (stdlib-only, so this module stays dependency-free)."""
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _corner_sides(
+    faces: Sequence[TrackPoint],
+    *,
+    majority: float,
+    min_offset: float = FACECAM_CORNER_OFFSET,
+) -> tuple[bool | None, bool | None]:
+    """
+    Which edge the face occupies on each axis: ``(left?, top?)``, `None` meaning "keep the median".
+
+    An axis is only snapped when the face's **median** centre clears `min_offset` from the midline
+    and a clear majority (`majority`) of frames sit on one side of it. A face near the middle is not
+    cornered however the individual frames split, and snapping it would drag the panel off the face.
+    The axes are decided independently, so a webcam in the top-centre keeps its horizontal position
+    while snapping to the top edge.
+    """
+    total = len(faces)
+    if total == 0:
+        return None, None
+
+    horizontal: bool | None = None
+    if abs(_median([point.x for point in faces]) - 0.5) >= min_offset:
+        left = sum(1 for point in faces if point.x < 0.5)
+        right = sum(1 for point in faces if point.x > 0.5)
+        if left / total >= majority:
+            horizontal = True
+        elif right / total >= majority:
+            horizontal = False
+
+    vertical: bool | None = None
+    if abs(_median([point.y for point in faces]) - 0.5) >= min_offset:
+        top = sum(1 for point in faces if point.y < 0.5)
+        bottom = sum(1 for point in faces if point.y > 0.5)
+        if top / total >= majority:
+            vertical = True
+        elif bottom / total >= majority:
+            vertical = False
+
+    return horizontal, vertical
+
+
+def facecam_box_from_track(
+    track: Sequence[TrackPoint],
+    *,
+    source_width: float,
+    source_height: float,
+    pad: float = FACECAM_PAD,
+    min_hits: int = FACECAM_MIN_FACE_HITS,
+    corner_majority: float = FACECAM_CORNER_MAJORITY,
+) -> tuple[float, float, float, float] | None:
+    """
+    Derive a facecam box from a tracked face, as fractions of the frame (or `None`).
+
+    Only the `opencv` face backend reports a real box (`TrackPoint.width/height > 0`); a motion
+    track carries no size and yields `None`, which is what keeps `facecam_box: auto` honest when
+    there is nothing to derive from. The box is the **median** of the tracked face boxes - so one
+    stray detection cannot drag it - grown by `pad` for headroom, then snapped flush to an edge
+    only when the face genuinely sits off-centre toward it (see `_corner_sides`), so the source crop
+    is stable instead of floating.
+    """
+    faces = [point for point in track if point.width > 0 and point.height > 0]
+    if len(faces) < max(1, int(min_hits)) or source_width <= 0 or source_height <= 0:
+        return None
+
+    box_w = _median([point.width for point in faces]) * max(1.0, pad)
+    box_h = _median([point.height for point in faces]) * max(1.0, pad)
+    width = clamp(box_w, 0.0, 1.0)
+    height = clamp(box_h, 0.0, 1.0)
+
+    horizontal, vertical = _corner_sides(faces, majority=corner_majority)
+    if horizontal is None:
+        x = _median([point.x for point in faces]) - width / 2.0
+    else:
+        x = 0.0 if horizontal else 1.0 - width
+    if vertical is None:
+        y = _median([point.y for point in faces]) - height / 2.0
+    else:
+        y = 0.0 if vertical else 1.0 - height
+    return (
+        clamp(x, 0.0, max(0.0, 1.0 - width)),
+        clamp(y, 0.0, max(0.0, 1.0 - height)),
+        width,
+        height,
+    )
 
 
 def _crop_inside(
