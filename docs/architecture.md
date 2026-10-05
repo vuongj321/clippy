@@ -19,55 +19,37 @@ editing     candidate → capture → boundaries → dead air → captions → v
 The only question the detector has to answer is *can we consistently surface moments a human would
 clip?* — and the only number that measures it is the **approve rate** over reviewed candidates.
 
-## How to read this
-
-This document has four parts. Part 1 is orientation, Parts 2 and 3 walk the two halves of the
-pipeline, and Part 4 is lookup material you can jump straight into.
-
-| If you want to… | Start with |
-| --- | --- |
-| run it end to end for the first time | [Commands](#commands-pyprojecttoml--srcclippyclipy) and [Running a VOD, step by step](#running-a-vod-step-by-step) |
-| understand why the timestamps line up | [The one timeline rule](#the-one-timeline-rule) |
-| understand how a moment gets detected | [Chat signals](#chat-signals-chatsignalspy--chatsignalevent), then [Fusing chat and audio](#fusing-chat-and-audio-detectdetectorcombine_signal_events) |
-| see where the data lives | [Where everything is stored](#where-everything-is-stored-storedbpy) |
-| change how a clip looks or reads | [Layout strategies](#layout-strategies-layout_strategy), [Caption styles](#caption-styles-caption_style), [Word emphasis](#word-emphasis-caption_emphasis), [Caption band](#caption-band-caption_safe_area) |
-| look up a configuration knob | [Configuration](#configuration) |
-| know what is knowingly unfinished | [Known gaps](#known-gaps) |
-| look up a word you do not know | [Appendix A — Glossary](#appendix-a--glossary) |
-
-## Contents
+## Contents and where to start
 
 - **Part 1 — Orientation**
-  - [The idea in one screen](#the-idea-in-one-screen)
-  - [What Clippy does and does not do](#what-clippy-does-and-does-not-do)
-  - [The tools you will meet](#the-tools-you-will-meet)
-  - [The one timeline rule](#the-one-timeline-rule)
-  - [Detecting a moment, end to end](#detecting-a-moment-end-to-end)
+  - [What Clippy is — and is not](#what-clippy-is--and-is-not)
+  - [One clock: stream-relative seconds](#one-clock-stream-relative-seconds)
+  - [The pipeline at a glance](#the-pipeline-at-a-glance)
   - [Running a VOD, step by step](#running-a-vod-step-by-step)
-  - [Turning a moment into a clip](#turning-a-moment-into-a-clip)
-- **Part 2 — The detection pipeline**
+- **Part 2 — Detection and review**
   - [Ingest: VOD and live](#ingest-vod-and-live)
-  - [Chat signals](#chat-signals-chatsignalspy--chatsignalevent)
-  - [Audio signals](#audio-signals-audiointensitypy--audiosignalevent)
-  - [Fusing chat and audio](#fusing-chat-and-audio-detectdetectorcombine_signal_events)
-  - [Coalescing and scoring](#coalescing-and-scoring-detectdetectorcoalesce_detections)
-  - [Cutting the candidate window](#cutting-the-candidate-window-extractffmpeg_cutpy)
-  - [Where everything is stored](#where-everything-is-stored-storedbpy)
-  - [Captions and transcripts](#captions-and-transcripts-caption)
-  - [The review loop](#the-review-loop-apiapppy--ui)
-  - [Measuring the approve rate](#measuring-the-approve-rate-evalexportpy)
+  - [Chat signals](#chat-signals)
+  - [Audio signals](#audio-signals)
+  - [Fusing chat and audio](#fusing-chat-and-audio)
+  - [Coalescing and scoring](#coalescing-and-scoring)
+  - [Cutting the candidate window](#cutting-the-candidate-window)
+  - [Where everything is stored](#where-everything-is-stored)
+  - [Captions and transcripts](#captions-and-transcripts)
+  - [The review loop](#the-review-loop)
+  - [Exports and the approve-rate report](#exports-and-the-approve-rate-report)
+- [From detection to editing](#from-detection-to-editing) — the bridge between the two halves
 - **Part 3 — The vertical clip editor**
-  - [The six stages, and what a re-run reuses](#the-six-stages-and-what-a-re-run-reuses)
-  - [Changing the edit: the three surfaces](#changing-the-edit-the-three-surfaces)
+  - [The steps, and what a re-run reuses](#the-steps-and-what-a-re-run-reuses)
   - [Layout strategies](#layout-strategies-layout_strategy)
   - [Caption styles](#caption-styles-caption_style)
   - [Word emphasis](#word-emphasis-caption_emphasis)
   - [Caption band](#caption-band-caption_safe_area)
   - [Editing decisions and why](#editing-decisions-and-why)
 - **Part 4 — Reference**
-  - [Commands](#commands-pyprojecttoml--srcclippyclipy)
-  - [HTTP surface](#http-surface-srcclippyapiapppy)
+  - [Commands](#commands)
+  - [HTTP surface](#http-surface)
   - [Module map](#module-map)
+  - [External tools](#external-tools)
   - [Configuration](#configuration)
   - [Failure modes and operational behaviour](#failure-modes-and-operational-behaviour)
   - [Known gaps](#known-gaps)
@@ -79,27 +61,7 @@ pipeline, and Part 4 is lookup material you can jump straight into.
 
 ## Part 1 — Orientation
 
-## The idea in one screen
-
-Three decisions explain almost everything else in this document.
-
-**One timeline.** Every time in the system is seconds relative to the start of the source, never
-wall-clock. A detection offset is therefore already an extraction offset, so chat and media cannot
-drift apart and there is no alignment step to get wrong.
-See [The one timeline rule](#the-one-timeline-rule).
-
-**Config-driven windows, fixed scores.** Window length and every threshold live in `Settings`,
-while scores are per-signal-kind constants plus one fusion boost. Ranking stays explainable: a
-reviewer reading a candidate's signals JSON can say why it ranked where it did. Captions are
-labels on top of that ranking, never a second score.
-
-**Humans own clippability.** The system only has to produce a small, ranked, playable set of
-moments plus a reason-coded label stream. That is what keeps it linear, single-writer and
-filesystem-backed — and what makes the central question answerable with one number.
-
----
-
-## What Clippy does and does not do
+### What Clippy is — and is not
 
 | In scope                                                     | Out of scope (by design)                                     |
 | ------------------------------------------------------------ | ------------------------------------------------------------ |
@@ -119,56 +81,25 @@ extract; they never feed back into detection.
 
 ---
 
-## The tools you will meet
+### One clock: stream-relative seconds
 
-Clippy is a Python project, but it leans on several outside programs. You do not need to know any of
-them in order to read this document — this is just enough to follow what each stage is doing.
+Every time in Clippy is seconds from the start of the source media, never wall-clock. That single
+rule is what lets the pipeline compose: a detection offset *is* an extraction offset, so chat and
+media cannot drift apart and there is no alignment step to get wrong.
 
-| Tool | What it is | Where Clippy uses it |
-| --- | --- | --- |
-| **FFmpeg** (`ffmpeg` + `ffprobe`) | the standard command-line audio/video converter | decoding audio for the loudness analysis, cutting every candidate window, and rendering the vertical clip, burned-in captions included |
-| **Streamlink** | records a live stream to a file | live mode, and high-quality VOD capture |
-| **yt-dlp** | a video downloader | the alternative capture backend to Streamlink |
-| **SQLite** | a database that is a single file | `data/clippy.db`: streams, candidates, reviews, renders |
-| **FastAPI + uvicorn + Jinja2** | a Python web framework, its server, and its HTML templating | the review UI served by `clippy-serve` |
-| **pydantic-settings** | reads settings from a YAML file, environment variables and a `.env` file | every knob in [Configuration](#configuration) |
-| **httpx + an OpenAI-compatible API** | an HTTP client, and a hosted API offering speech-to-text (Whisper) and a chat model | the optional captions, word emphasis and metadata; skipped entirely when no API key is set |
-| **libass** | the subtitle renderer FFmpeg embeds | drawing the burned-in captions into the vertical clip |
-| **OpenCV** (`opencv-python-headless`) | a computer-vision library | optional face detection for framing, off unless asked for |
-| **numpy** | numerical arrays | audio frame statistics and motion tracking |
-| **uv** | the Python package and project manager this repo uses | `uv sync`, `uv run clippy-…` |
+- **VOD:** `t = 0` is the start of the media file. A chat dump must already be on that clock.
+- **Live:** recording and chat both start from the moment capture began, so they share origin `0`.
+- **The one thing not to do** is mix wall-clock with media timestamps without an explicit offset —
+  it is the most failure-prone spot in the system, which is why both live chat and live media
+  derive from a single recorded origin.
 
-The pattern worth noticing: everything that costs money or CPU is behind a fallback. No API key, no
-face detector, or no tracking backend still produces a reviewable clip — the system degrades rather
-than fails, and records why in `plan.json`.
+Chat messages are sorted by `ts` on load, which the signal scanners rely on.
 
 ---
 
-## The one timeline rule
+### The pipeline at a glance
 
-All times in the system are **seconds relative to stream start**, called `ts` or
-`source_ts`. This single contract is what makes the pipeline composable.
-
-- **VOD:** `t=0` is the start of the local media file. Chat JSON must already be on that
-  clock via `ts`, `offset_seconds`, `content_offset_seconds`, or `contentOffsetSeconds`
-  (see `chat/models._parse_message`). ffmpeg seek positions are applied to the same file, so
-  detection time == extraction offset with no offset arithmetic.
-- **Live:** `LiveIngestSession.timeline_origin = time.time()` is set at `start()`. Streamlink
-  begins writing the media file at that instant and `TwitchIrcChat` stamps every message as
-  `time.time() - timeline_origin`. Recorded file PTS and chat `ts` therefore share origin 0.
-- **Never** mix wall-clock and media PTS without an explicit origin offset — this is the most
-  failure-prone area of the system, so both live chat and live media derive from the single
-  `timeline_origin` value.
-
-Chat messages are sorted by `ts` on load, which the two-pointer scanners in
-`chat/signals.py` rely on.
-
----
-
-## Detecting a moment, end to end
-
-The graph below is the whole system in one picture: the detection chain, and the edit branch
-(Part 3) that hangs off the same `store`.
+The graph below is the whole system in one picture: the detection chain, and the edit branch that hangs off the same `store`.
 
 ```mermaid
 flowchart TD
@@ -200,7 +131,7 @@ flowchart TD
 The detection half of that picture ends at a review decision. The editing half starts from the same
 `store`: `clippy-edit` turns a candidate into a rendered vertical clip and records each attempt as a
 `renders` row, which the same UI then plays back for approval
-(see [Turning a moment into a clip](#turning-a-moment-into-a-clip)).
+(see [From detection to editing](#from-detection-to-editing)).
 
 Everything downstream of ingest is shared. The VOD path and the live path produce the same
 `VodIngestResult`-shaped object (a media file, chat messages on a stream-relative clock, and
@@ -250,18 +181,7 @@ produces the eval artifacts. The commands are independent processes sharing only
 
 ---
 
-## Turning a moment into a clip
-
-Detection answers *which moments*. The edit pipeline answers *can those moments be published
-without a human opening an editor* — and what exactly a reviewer still has to check first.
-
-That is the bridge between the two halves of the system, and it is where this document splits:
-Part 2 covers detection, Part 3 covers editing. Both halves share the same database and the same
-stream-relative clock, so they never disagree about *when* something happened.
-
----
-
-## Part 2 — The detection pipeline
+## Part 2 — Detection and review
 
 Detection is a two-stage pipeline: **per-modality event extraction** followed by
 **combination and coalescing**. Each stage is a pure function of its inputs plus thresholds,
@@ -269,7 +189,7 @@ so it can be reasoned about and tested independently.
 
 ---
 
-## Ingest: VOD and live
+### Ingest: VOD and live
 
 Ingest is the only part of the system that knows whether it is looking at a file or a live
 stream, and it is the only place the two modes differ. Both adapters return the same shape —
@@ -327,7 +247,7 @@ sequenceDiagram
 
 ---
 
-## Chat signals (`chat/signals.py` → `ChatSignalEvent`)
+### Chat signals
 
 Two independent detectors run over the same message list:
 
@@ -356,9 +276,12 @@ rather than a bucket full of zeros. That makes the multiplier sensitive in quiet
 which is exactly where `CLIP IT` bursts matter — and it is also the knob most likely to need
 tuning per channel (`chat_spike_multiplier`, `chat_min_rate`).
 
+*In code:* `chat/signals.py` → `detect_chat_signals`; keywords come from
+`chat/keywords.py` → `first_keyword`.
+
 ---
 
-## Audio signals (`audio/intensity.py` → `AudioSignalEvent`)
+### Audio signals
 
 1. `extract_mono_pcm` decodes the whole media file to mono 16 kHz float32 little-endian PCM
    through an ffmpeg stdout pipe (`-ac 1 -ar 16000 -f f32le pipe:1`).
@@ -374,9 +297,11 @@ tuning per channel (`chat_spike_multiplier`, `chat_min_rate`).
 The absolute floor exists so near-silence frames cannot produce spikes from tiny baselines;
 the relative term is what actually signals a shout, laugh, or loud reaction.
 
+*In code:* `audio/intensity.py` → `extract_mono_pcm`, `compute_rms_series`, `detect_audio_spikes`.
+
 ---
 
-## Fusing chat and audio (`detect/detector.combine_signal_events`)
+### Fusing chat and audio
 
 Chat and audio events are fused into `RawDetection` rows:
 
@@ -389,9 +314,11 @@ Chat and audio events are fused into `RawDetection` rows:
   chat reaction is still surfaced for review.
 - Output is sorted by `ts`.
 
+*In code:* `detect/detector.py` → `combine_signal_events` (returns `RawDetection` rows).
+
 ---
 
-## Coalescing and scoring (`detect/detector.coalesce_detections`)
+### Coalescing and scoring
 
 Raw detections are sorted and clustered: a detection joins the current cluster when it is
 within `coalesce_gap_seconds` (20 s) of the previous detection. Each cluster becomes exactly
@@ -406,9 +333,15 @@ one candidate per moment":
 There is intentionally **no learned ranking** and no cross-modality normalization beyond the
 above; the score ordering only has to be good enough to sort the review queue.
 
+Window length and every threshold live in `Settings`, while scores are per-signal-kind constants
+plus one fusion boost, so a reviewer reading a candidate's signals JSON can say why it ranked
+where it did. Captions are labels on top of that ranking, never a second score.
+
+*In code:* `detect/detector.py` → `coalesce_detections` (returns `CoalescedCandidate`).
+
 ---
 
-## Cutting the candidate window (`extract/ffmpeg_cut.py`)
+### Cutting the candidate window
 
 A candidate is a timestamp, not a file. Extraction turns it into something a reviewer can
 watch, and it is the step most likely to run short of disk — which is why the budget lives here.
@@ -437,9 +370,12 @@ output   = data/media/candidate_{candidate_id}.mp4
   every extract; once the budget is hit, **all remaining candidates are still persisted**
   without media and counted in `skipped_disk` in the run summary. Nothing silently vanishes.
 
+*In code:* `extract/ffmpeg_cut.py` → `extract_window`, `within_disk_budget`; the human-readable
+reason is `caption/reason.py` → `format_extract_reason`.
+
 ---
 
-## Where everything is stored (`store/db.py`)
+### Where everything is stored
 
 SQLite, one file (`data/clippy.db`), no ORM. `Database` opens a short-lived connection per
 operation through a `connection()` context manager (`PRAGMA foreign_keys = ON`, commit on
@@ -558,191 +494,170 @@ indexes cover.
 - Timestamps are ISO-8601 UTC strings (`utc_now()`). They are audit metadata only and are never
   used for signal math, which uses stream-relative seconds exclusively.
 
----
-
-## Captions and transcripts (`caption/`)
-
-Annotation is a **post-extract, same-run-only** pass. It does not change `score`, window
-bounds, or review status.
-
-1. After the extract loop, `_select_annotation_jobs` ranks successfully extracted clips by
-   `(-score, source_ts, candidate_id)` and keeps the top `caption_max_per_run` (default 20).
-   A non-positive cap, or an empty extract list, skips the pass. Disk-skipped rows and
-   ffmpeg failures are never selected.
-2. If `CLIPPY_OPENAI_API_KEY` / `settings.openai_api_key` is unset, the pass is skipped and
-   the summary reports `annotated: 0`.
-3. For each selected job, `annotate_extracted_candidate`:
-   - Builds a despammed chat window (`caption.chat_context.build_chat_context`) over
-     `[source_ts - pre, source_ts + post]`, preferring keyword hits, dropping empty and
-     emote-only lines, and capping at `caption_max_chat_messages` (default 40).
-   - Transcribes the cut MP4 via `caption.asr.transcribe_media` (OpenAI-compatible
-     `/audio/transcriptions`, default `whisper-1`).
-   - Asks the caption model (default `gpt-4o-mini`) for a 3–10 word description. The prompt
-     forbids inventing events or restating detection scores.
-4. `update_candidate_caption` writes only the fields that were produced. Partial updates do
-   not null the other column. Per-candidate ASR or caption HTTP failures are logged; the
-   pipeline continues.
-5. There is **no later pass**. Rerunning the pipeline creates new candidate rows; it does
-   not backfill captions on existing ones. These captions are review-UI and export fields: the
-   detection pass never writes media. Burned-in captions are a separate track, produced by the
-   edit pipeline from `trimmed.mp4`
-(see [Turning a moment into a clip](#turning-a-moment-into-a-clip)).
-
-`extract_reason` is independent of this pass. It is derived from signals on every candidate
-and is what the grid shows when no caption exists.
+*In code:* `store/db.py` → `Database`; existing databases pick up new columns through
+`TABLE_MIGRATIONS`.
 
 ---
 
-## The review loop (`api/app.py` + `ui/`)
+### Captions and transcripts
 
-The review step is what turns detections into labels, and it is intentionally the simplest
-possible surface — HTML pages, HTML5 video, one form, no JavaScript.
+An optional, best-effort pass that adds a short description and a transcript to clips that were
+**already extracted in this run**. It never changes a score, a window bound, or a review decision;
+it only adds reading material to the review page and the export.
 
-1. `GET /` renders `index.html`: a card grid of candidates (pending by default) with an inline
-   `<video>` served from `/media/{id}`, plus score, `source_ts`, stream mode, and status. The
-   card title is `caption` when present, otherwise `#id · streamer`. The subtitle under the
-   video is `extract_reason` when present, otherwise the raw signal `kind`/`kinds`. A
-   `status` query parameter switches to `pending|approved|rejected|all`.
-2. `GET /candidates/{id}` renders `candidate.html`: full video, caption as the page title
-   when present, extract reason, optional transcript, pretty-printed signals JSON behind a
-   `<details>` block, and the review forms.
-3. `POST /candidates/{id}/review` accepts `decision`, `reason_code`, `notes`; validates the
-   decision; drops `reason_code` on approvals; calls `db.review_candidate(...)`; and 303
-   redirects to `/` so a refresh cannot resubmit.
-4. Both pages display `db.stats()` — pending/approved/rejected counts, approve rate, and the
-   rejection-reason breakdown — so a reviewer can watch the approve rate move while labelling.
-5. `GET /api/stats` exposes the same numbers as JSON for scripting.
-6. The candidate page also owns the edit: it plays the current render, prints the framing
-   (strategy, upscale factor, layer list), the caption cues and whatever warnings the render
-   produced, and offers a re-render form (`strategy`, `caption_style`, `caption_emphasis`,
-   `force`), metadata editing and a `final.mp4` download. Re-rendering is synchronous — the
-   request blocks until the encode finishes.
+- **Scope.** At most the top `caption_max_per_run` extracted clips (default 20, highest score
+  first). No API key → the pass is skipped and the run summary reports `annotated: 0`.
+  Disk-skipped rows and ffmpeg failures are never annotated.
+- **What it does.** Builds a cleaned-up chat window around the moment, transcribes the extracted
+  MP4, then asks the caption model for a short 3–10 word description.
+- **Partial results survive.** Only the fields that were produced are written, so a transcript
+  whose caption call failed is still saved and the other field is left untouched. Per-clip ASR or
+  caption failures are logged and the run continues.
+- **No later pass.** Re-running the pipeline creates new candidates; it does not backfill
+  captions on old rows.
+
+**Two different things are called "captions".** This pass writes a *review label* — shown in the
+review UI and exported. The burned-in on-screen text is a separate track produced by the
+[editor](#from-detection-to-editing). `extract_reason` is a third, unrelated field: why the clip
+was cut, always present even when there is no caption.
+
+*In code:* `caption/generate.py` → `annotate_extracted_candidate`; the chat window is
+`caption/chat_context.py`, transcription is `caption/asr.py`, and the write is
+`db.update_candidate_caption`.
+
+---
+
+### The review loop
+
+Deliberately the smallest thing that can collect a label: HTML pages, an HTML5 video element, one
+form, no JavaScript. A reviewer opens the grid, watches a clip, and approves or rejects it with an
+optional reason code — and that label is what the whole system is ultimately scored on.
+
+- **Grid (`/`)** — candidates ranked by score, pending first, each with an inline player, the
+  caption or extract reason, and the stream mode. A status filter switches between pending,
+  approved, rejected and all.
+- **Candidate page** — the full clip, the signals behind it, the transcript, the current render
+  and its warnings, and both the review and re-render forms.
+- **Deciding** — approve or reject; a rejection may carry a reason code, which is dropped on
+  approval. The write is idempotent and re-reviewable, and the redirect means a refresh cannot
+  resubmit.
+- **The number** — both pages show running totals and the approve rate, so the metric moves as
+  you label.
 
 Because labelling happens against the *detected* set, approve rate is a direct precision proxy
 for the detector as configured: `approve_rate = approved / (approved + rejected)`. It is the
 number that threshold tuning (`coalesce_gap_seconds`, spike multipliers, `chat_min_rate`) is
 meant to move. Captions are not part of that metric.
 
+*In code:* routes and templates in `api/app.py` + `ui/`; the full route table is in
+[HTTP surface](#http-surface).
+
 ---
 
-## Measuring the approve rate (`eval/export.py`)
+### Exports and the approve-rate report
 
-- `export_reviews_json` / `export_reviews_csv` write `data/exports/reviews.json` and
-  `reviews.csv` from a single join across `reviews → candidates → streams → streamers`,
-  flattening each row and decoding `signals` back into structured JSON. The CSV has an explicit
-  `fieldnames` list (including `caption`, `extract_reason`, `transcript`) and ignores extras,
-  so the export schema is stable for downstream analysis.
-- `precision_report` returns `db.stats()` plus `clip_keyword_candidates` — a count of
-  candidates whose signal blob mentions the `clip` keyword. This is a lightweight
-  **weak-label proxy recall check**: if chat screamed `CLIP IT` and no candidate was produced,
-  recall is failing even when precision looks fine.
-- `clippy-export` prints the report and writes both files. There is no automated ground-truth
-  comparison by design — human labels *are* the ground truth.
+`clippy-export` writes the label set to JSON and CSV and prints the numbers that describe it. The
+headline is the **approve rate** — approved ÷ (approved + rejected) over reviewed candidates — the
+direct precision proxy for the detector as configured.
+
+- **The exports.** `data/exports/reviews.json` and `reviews.csv`, from one flattened join across
+  reviews → candidates → streams → streamers, with a fixed CSV schema so downstream analysis does
+  not break.
+- **The weak-label check.** Counts candidates whose signals mention the `clip` keyword — a rough
+  recall sanity check: if chat screamed `CLIP IT` and no candidate was produced, recall is failing
+  even when precision looks fine.
+- **No ground truth by design.** Human labels *are* the ground truth, so there is no automatic
+  comparison; `clippy-export` simply prints the report and writes both files.
+
+*In code:* `eval/export.py` → `export_reviews_json`, `export_reviews_csv`, `precision_report`.
+
+---
+
+## From detection to editing
+
+Detection answers *which moments*. The editor answers *can this moment be published as it stands* —
+and if not, what a reviewer still has to fix first. Both halves share the same database and the same
+stream-relative clock, so they never disagree about *when* something happened.
+
+Everything so far turned signals into a reviewable candidate. The rest of this document turns a
+candidate into a finished vertical clip.
 
 ---
 
 ## Part 3 — The vertical clip editor
 
-## The six stages, and what a re-run reuses
+The second half of the system: turning a reviewed candidate into a 1080x1920 clip that could be
+posted as it stands. It runs as a short sequence of steps that cache their work, so a re-run only
+redoes what changed. The rest of this part covers those steps, the reviewer-facing choices that
+shape them, and why the defaults are what they are.
+
+### The steps, and what a re-run reuses
+
+An edit is an ordered sequence of steps:
 
 ```text
-HQ capture → boundaries → extract base → dead air → captions → vertical → audio → metadata → review
+HQ capture → bounds → base → dead air → captions → vertical → audio → metadata → review
 ```
 
-Every stage owns an artifact under `data/edits/<candidate_id>/` and a `stage` in `plan.json`,
-so a run can stop, be inspected, and resumed:
+`HQ capture` is the input (a high-quality copy of the source, fetched by `clippy-capture`) and
+`review` is the human decision at the end. Every step in between writes one artifact under
+`data/edits/<candidate_id>/`:
 
-| stage | artifact | meaning |
-| --- | --- | --- |
-| `planned` | `plan.json` | bounds chosen, nothing rendered |
-| `extracted` | `base.mp4` | exact source window, cached |
-| `trimmed` | `trimmed.mp4`, `layout.json` | dead air removed, framing resolved |
-| `captioned` | `captions.ass`, `transcript.json` | word timings and cues |
-| `composed` | `vertical.mp4`, `compose.inputs.json` | 1080x1920, captions burned in |
-| `complete` | `final.mp4`, `metadata.json`, `thumbnail.jpg` | loudness-normalized and publishable |
+| step | what it does | how | artifact |
+| --- | --- | --- | --- |
+| bounds | picks where the clip starts and ends, before any media is touched | the chat reaction curve (`detect_bounds`), falling back to the fixed review window when there is no chat evidence | `plan.json` |
+| base | cuts the exact source window, untouched | one ffmpeg re-encode of the capture at `intermediate_crf` | `base.mp4` |
+| dead air | removes silent stretches and resolves the framing | `silencedetect` with guard bands and a payoff cap, then the layout/track pass | `trimmed.mp4`, `layout.json` |
+| captions | turns word timings into readable cues and a subtitle track | ASR word timings → cue grouping → karaoke or plain ASS | `captions.ass`, `transcript.json` |
+| vertical | fills 1080x1920 and burns the captions in | a single ffmpeg pass: crop / scale / overlay / concat / subtitles | `vertical.mp4`, `compose.inputs.json` |
+| audio | levels the loudness | two-pass `loudnorm` with a true-peak limit | audio replaced in `final.mp4` |
+| metadata | writes the publish metadata and a cover frame | a validated model proposal (deterministic fallback), plus a frame grab | `final.mp4`, `metadata.json`, `thumbnail.jpg` |
 
-Boundary detection writes one more cache beside those, `boundary_transcript.json` (word-timed ASR
-of the review window); it is evidence for the cut rather than a stage artifact.
+**A `stage` is a checkpoint, not a step.** `plan.json` carries a `stage` field with exactly three
+values, set as a run passes them: `planned` once the bounds are chosen, `composed` once
+`vertical.mp4` exists, and `complete` once the audio and metadata steps have finished. It is a
+progress marker for the logs and the candidate page — it is *not* a cache key. What a re-run reuses
+is decided from the artifacts themselves: a step whose output already exists is skipped, and
+composition additionally reads `compose.inputs.json` to check that the pixels, the caption text,
+the layout and the encode settings still match the video it finds.
 
-Three rules keep the stages composable:
+The `bounds` step also leaves `boundary_transcript.json` behind: a word-timed transcript of the
+review window. No later step consumes it, so it is not a step artifact — it is the evidence the
+cut was actually made on, kept so a reviewer can see why the bounds landed where they did.
+
+Four rules keep the steps composable:
 
 1. **Times on the trimmed timeline.** Captions are transcribed from `trimmed.mp4`, so no cue
    ever needs remapping after a cut.
-2. **Every stage caches, and the composed stage checks its inputs.** A stage with an existing
-   artifact is reused without `--force`, but composition can tell whether the artifact it finds
+2. **Every step caches, and composition checks its own inputs.** A step whose artifact already
+   exists is skipped without `--force`, but composition can tell whether the artifact it finds
    still matches the pixels, the caption text, the framing and the encode settings that are now
    on offer (`compose.inputs.json`), and the loudness pass refuses a `final.mp4` older than the
    `vertical.mp4` it came from. `--force` discards everything for that candidate.
-3. **Framing is resolved before captions.** Reading the frame is what tells the caption stage
+3. **Framing is resolved before captions.** Reading the frame is what tells the caption step
    whether the band has to move, so the layout (and `layout.json`) is planned immediately after
    the dead-air cut rather than at the end of composition. It is resolved once and handed to the
-   composition stage, so the frame sampling is never paid for twice.
+   composition step, so the frame sampling is never paid for twice.
+4. **Steps read the plan, not `Settings`.** `build_plan` resolves the config default and any CLI
+   or UI override once and writes the result into `plan.json`; every later step reads that record,
+   which is what makes an override survive a re-run.
 
-Re-rendering is cheap on purpose, and worth knowing exactly. Without `--force`: `base.mp4`,
-`trimmed.mp4` and `transcript.json` are reused; `captions.ass` is rebuilt from the cached
-transcript, so no ASR is paid for; and `vertical.mp4` is reused only when its inputs still match
-it, because the trimmed pixels, the caption text, the resolved layout and the encode settings are
-fingerprinted into `compose.inputs.json`. A caption-style change therefore re-encodes and reaches
-the MP4 on its own, while a no-op re-run does not encode at all. `final.mp4` obeys the same
-principle in a simpler form: it is reused only while it is newer than the `vertical.mp4` it came
-from. `--force` skips all of it and rebuilds every stage, including ASR.
+Re-rendering is cheap on purpose, and worth knowing exactly. Without `--force`:
 
----
+- `base.mp4`, `trimmed.mp4` and `transcript.json` are **reused**.
+- `captions.ass` is **rebuilt from the cached transcript**, so no ASR is paid for.
+- `vertical.mp4` is reused only when its inputs still match it — the trimmed pixels, the caption
+  text, the resolved layout and the encode settings are fingerprinted into `compose.inputs.json`.
+  A caption-style change therefore re-encodes and reaches the MP4 on its own, while a no-op re-run
+  does not encode at all.
+- `final.mp4` obeys the same principle in a simpler form: it is reused only while it is newer than
+  the `vertical.mp4` it came from.
 
-## Changing the edit: the three surfaces
-
-`clippy-edit` exposes a small set of reviewer-facing choices. This section is the reference for
-what each value actually does, because the answer is spread across `edit/layouts.py`,
-`caption/styles.py`, `caption/align.py` and `caption/emphasis.py` rather than documented per
-option anywhere else.
-
-The settings travel in three hops, and knowing the middle hop explains most surprises:
-
-```text
-config.yaml / Settings  →  CLI flags (--strategy, --caption-style, --caption-emphasis)
-                            or the UI render form  →  EditOverrides
-                                                     → build_plan folds them into plan.json
-                                                     → the stage reads the PLAN, not Settings
-```
-
-`build_plan` resolves `override or settings` once, so `plan.json` is the record of what was
-requested, and every stage reads the PLAN rather than `Settings`: the caption stage reads
-`plan.captions.style` / `plan.captions.emphasis`, and composition reads `plan.layout` (strategy,
-size, `crop_bias`, `zoom`), which is what makes a CLI or UI override take effect on a re-render
-instead of being replaced by the `config.yaml` default. Values with no override path
-(`caption_safe_area`, the cue rules, fonts and colours) are read from `Settings` directly.
-Anything a reviewer sees is therefore in `plan.json`: `layout.strategy` (requested) vs
-`layout.resolved_strategy` (chosen), `captions.style`, `captions.emphasis`,
-`captions.emphasis_source`, `captions.anchor`, `captions.emphasis_words` and `captions.cue_count`.
-
-| surface | can change |
-| --- | --- |
-| CLI (`clippy-edit`) | `--strategy`, `--caption-style`, `--caption-emphasis`, `--deadair-mode`, `--no-captions`, `--force` |
-| UI render form (create or re-render) | `strategy`, `caption_style`, `caption_emphasis`, `force` and an optional `chat_path` chat dump - `deadair_mode` is CLI/config-only, while `crop_bias`, `zoom`, `target_width` and `target_height` have `EditOverrides` fields (now honoured by composition) but no CLI flag or UI field yet |
-| `config.yaml` / `CLIPPY_*` env | everything else: target size and fps, fonts, colours, cue rules, `caption_safe_area`, track backend, `facecam_box` |
-
-Both interactive surfaces build an `EditOverrides` and `build_plan` folds it into the plan it
-writes, so an override applies to the candidates being (re-)planned in that invocation and the
-result is durable in `plan.json` afterwards.
-
-The UI form is also the only *creation* surface. A candidate with no `plan.json` gets a **Create
-clip** form that plans and renders in one synchronous pass, so the first clip never needs a CLI step;
-the page names the stream's missing capture instead of offering a button whose render could only
-fail. A render that raises records a failed `renders` row, and the candidate page shows the error
-above the form.
-
-An empty select means the `config.yaml` default for that option, not the value the plan already
-records, so a form submitted untouched re-plans layout and caption style from config - the same rule
-the CLI follows. The labels say "config default" rather than implying the current choice is kept.
-
-A re-plan that is given no chat evidence keeps the boundaries already recorded in `plan.json` for
-the same source, rather than silently resetting the cut to the review window; point it at a
-different source and the recorded bounds are discarded. Naming a chat dump in the form is what lets a
-re-render re-derive the cut from the chat reaction curve, which the CLI does with `--chat`.
+`--force` skips all of it and rebuilds every step, including ASR.
 
 ---
 
-## Layout strategies (`layout_strategy`)
+### Layout strategies (`layout_strategy`)
 
 The deliverable is 1080x1920 (`clip_target_width` x `clip_target_height`) at `clip_fps`
 (`0` follows the source). Filling a 9:16 canvas from a 16:9 source always needs a decision,
@@ -853,7 +768,7 @@ and degraded rather than fatal.
 
 ---
 
-## Caption styles (`caption_style`)
+### Caption styles (`caption_style`)
 
 `caption_style` picks a preset from `caption/styles.py` (`_PRESETS`), and `Settings` then
 overrides individual attributes on top of it. These numbers *are* the definition of each style:
@@ -903,7 +818,7 @@ each cue's end to the next cue's start, so the track is monotonic and no two cue
 
 ---
 
-## Word emphasis (`caption_emphasis`)
+### Word emphasis (`caption_emphasis`)
 
 Emphasis decides which words get highlighted. Both active modes pick from the same cap
 (`DEFAULT_EMPHASIS_LIMIT`, 12 words) and the result is recorded in `captions.emphasis_words`,
@@ -956,7 +871,7 @@ reviewer asking "why are these words highlighted?" can answer it from `plan.json
 
 ---
 
-## Caption band (`caption_safe_area`)
+### Caption band (`caption_safe_area`)
 
 `caption_safe_area` chooses where the caption band sits, and it maps onto an ASS alignment:
 
@@ -1016,7 +931,7 @@ therefore means "distance from the bottom (or top) edge" and has no effect on `m
 
 ---
 
-## Editing decisions and why
+### Editing decisions and why
 
 **Capture `best`, then let clips decide alignment.** Streamlink was originally invoked at
 `worst` quality, which made every downstream stage fight a 284x160 source. Capture now asks for
@@ -1057,7 +972,7 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 
 ## Part 4 — Reference
 
-## Commands (`pyproject.toml` → `src/clippy/cli.py`)
+### Commands
 
 | Command          | Function                     | What it does                                                                 |
 | ---------------- | ---------------------------- | ---------------------------------------------------------------------------- |
@@ -1074,7 +989,7 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 
 ---
 
-## HTTP surface (`src/clippy/api/app.py`)
+### HTTP surface
 
 | Route                                | Purpose                                                      |
 | ------------------------------------ | ------------------------------------------------------------ |
@@ -1094,7 +1009,7 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 
 ---
 
-## Module map
+### Module map
 
 | Path                              | Responsibility                                                                                  |
 | --------------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -1155,7 +1070,32 @@ inside its functions.
 
 ---
 
-## Configuration
+### External tools
+
+Clippy is a Python project, but it leans on several outside programs. You do not need to know any of
+them to read this document — this is just enough to follow what each stage is doing.
+
+| Tool | What it is | Where Clippy uses it |
+| --- | --- | --- |
+| **FFmpeg** (`ffmpeg` + `ffprobe`) | the standard command-line audio/video converter | decoding audio for the loudness analysis, cutting every candidate window, and rendering the vertical clip, burned-in captions included |
+| **Streamlink** | records a live stream to a file | live mode, and high-quality VOD capture |
+| **yt-dlp** | a video downloader | the alternative capture backend to Streamlink |
+| **SQLite** | a database that is a single file | `data/clippy.db`: streams, candidates, reviews, renders |
+| **FastAPI + uvicorn + Jinja2** | a Python web framework, its server, and its HTML templating | the review UI served by `clippy-serve` |
+| **pydantic-settings** | reads settings from a YAML file, environment variables and a `.env` file | every knob in [Configuration](#configuration) |
+| **httpx + an OpenAI-compatible API** | an HTTP client, and a hosted API offering speech-to-text (Whisper) and a chat model | the optional captions, word emphasis and metadata; skipped entirely when no API key is set |
+| **libass** | the subtitle renderer FFmpeg embeds | drawing the burned-in captions into the vertical clip |
+| **OpenCV** (`opencv-python-headless`) | a computer-vision library | optional face detection for framing, off unless asked for |
+| **numpy** | numerical arrays | audio frame statistics and motion tracking |
+| **uv** | the Python package and project manager this repo uses | `uv sync`, `uv run clippy-…` |
+
+The pattern worth noticing: everything that costs money or CPU is behind a fallback. No API key, no
+face detector, or no tracking backend still produces a reviewable clip — the system degrades rather
+than fails, and records why in `plan.json`.
+
+---
+
+### Configuration
 
 Layered as: **`config.yaml` (init kwargs) → `CLIPPY_*` env vars → `.env` file → field
 defaults**. YAML takes precedence over environment variables here because YAML is passed as
@@ -1164,7 +1104,7 @@ pydantic-settings *init* arguments, which rank highest in the source priority or
 `CLIPPY_PORT=9999` with `port: 8000` in `config.yaml` resolves to `8000`. `get_settings()` is
 `lru_cache`d, and every CLI entry point calls `get_settings.cache_clear()` so `--config` works.
 
-### Paths, detection and annotation
+#### Paths, detection and annotation
 
 | Key                            | Default                                    | Effect                                              |
 | ------------------------------ | ------------------------------------------ | --------------------------------------------------- |
@@ -1197,7 +1137,7 @@ pydantic-settings *init* arguments, which rank highest in the source priority or
 | `caption_max_per_run`          | `20`                                       | Top-N extracted clips annotated this run            |
 | `host` / `port`                | `127.0.0.1` / `8000`                       | Review UI bind address                              |
 
-### Editing
+#### Editing
 
 These are the knobs the edit pipeline exposes. Defaults are the `Settings` defaults in
 `src/clippy/config.py`; `config.example.yaml` is the annotated starting point and deliberately
@@ -1255,7 +1195,7 @@ and the 1.0 s same-kind dedupe gap in `chat/signals._dedupe_nearby`.
 
 ---
 
-## Failure modes and operational behaviour
+### Failure modes and operational behaviour
 
 | Situation                                   | Behaviour                                                                        |
 | ------------------------------------------- | -------------------------------------------------------------------------------- |
@@ -1287,7 +1227,7 @@ extracts, and disk for `data/media`. SQLite traffic is small and single-writer; 
 
 ---
 
-## Known gaps
+### Known gaps
 
 These are the seams that are known and accepted, not a bug list. Each one is a decision with a
 stated reason, so the next person can judge whether the tradeoff still holds.
@@ -1320,7 +1260,7 @@ and one line of `Settings` → pipeline wiring — not restructuring the pipelin
 
 ---
 
-## Testing
+### Testing
 
 `uv run pytest -q` runs the whole suite.
 
@@ -1350,7 +1290,7 @@ uv run clippy-export
 
 ---
 
-## Appendix A — Glossary
+### Appendix A — Glossary
 
 Every term this document uses without explaining, in one place.
 
@@ -1379,7 +1319,7 @@ Every term this document uses without explaining, in one place.
 
 ---
 
-## Appendix B — Chat JSON shapes
+### Appendix B — Chat JSON shapes
 
 Chat input must already be on the stream clock. `chat.models.load_chat_json` accepts three shapes:
 

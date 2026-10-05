@@ -73,11 +73,11 @@ Each candidate's edit lives in `data/edits/{candidate_id}/` and starts with `pla
 clip bounds, dead-air map, layout, captions, audio targets and any warnings. `renders` rows in
 SQLite track every revision.
 
-Stages run in order and cache: `planned → extracted → trimmed → captioned → composed → complete`. A
-re-run redoes only what changed: composition checks whether the pixels, the caption text, the
-framing and the encode settings still match the video it finds, and the loudness pass refuses a
-`final.mp4` that is older than the `vertical.mp4` it came from. `--force` rebuilds every stage,
-including transcription.
+Steps run in order and cache, so a re-run redoes only what changed: composition checks whether the
+pixels, the caption text, the framing and the encode settings still match the video it finds, and
+the loudness pass refuses a `final.mp4` that is older than the `vertical.mp4` it came from.
+`plan.json` records a `stage` of `planned → composed → complete` as the run progresses. `--force`
+rebuilds every step, including transcription.
 
 Useful flags: `--dry-run`, `--force`, `--strategy auto|fit_blur|irl|gaming|conversation`,
 `--caption-style karaoke_highlight|block_pop|minimal`, `--caption-emphasis heuristic|llm|off`,
@@ -168,8 +168,9 @@ Editing knobs: `clip_target_width`/`clip_target_height`/`clip_fps`, `layout_stra
 `metadata_title_max_chars`, `metadata_max_hashtags`, `thumbnail_enabled`, `thumbnail_overlay_text`.
 
 **What each editing setting actually does** — the layout strategies, the caption style presets, the
-word-emphasis modes and the caption band — is documented in
-[Changing the edit: the three surfaces](docs/architecture.md#changing-the-edit-the-three-surfaces).
+word-emphasis modes and the caption band — is documented in the
+[vertical clip editor](docs/architecture.md#part-3--the-vertical-clip-editor) part of the
+architecture notes.
 
 **Known gaps:** dead air is cut without a speech veto, `conversation` splits the frame rather than
 tracking who is speaking, and a vertical crop can only reframe a source that is taller than 9:16 —
