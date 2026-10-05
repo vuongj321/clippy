@@ -18,17 +18,10 @@ from clippy.store.db import Candidate, Stream, utc_now
 PLAN_VERSION = 1
 PLAN_FILENAME = "plan.json"
 
-PlanStage = Literal[
-    "planned",
-    "extracted",
-    "trimmed",
-    "captioned",
-    "composed",
-    "normalized",
-    "metadata",
-    "complete",
-    "failed",
-]
+# The three checkpoints an edit records as it runs. Reuse is decided from the artifacts on disk
+# (and `compose.inputs.json` for composition), never from this field; `stage` exists so the logs
+# and the candidate page can show how far a render got.
+PlanStage = Literal["planned", "composed", "complete"]
 BoundsMethod = Literal["review_window", "signal_evidence", "llm_refined"]
 
 STRATEGIES = ("auto", "fit_blur", "irl", "gaming", "conversation")
