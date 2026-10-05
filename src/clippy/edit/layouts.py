@@ -1,4 +1,4 @@
-"""Vertical layout planning (M6).
+"""Vertical layout planning.
 
 A layout is a list of segments, each holding layers that map a source rectangle onto a
 vertical canvas rectangle. Plans are serialisable (`layout.json`) and the composition

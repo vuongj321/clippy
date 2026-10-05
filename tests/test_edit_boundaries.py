@@ -257,9 +257,9 @@ def _chat_burst_decision(tmp_path: Path) -> tuple[Settings, object]:
 def test_detect_bounds_falls_back_without_evidence(tmp_path: Path):
     settings = _settings(tmp_path)
     decision = detect_bounds(candidate=_candidate(), settings=settings)
-    assert decision.bounds.method == "phase1_window"
+    assert decision.bounds.method == "review_window"
     assert decision.bounds.duration == pytest.approx(45.0)
-    assert "Phase 1" in decision.adjustments[0]
+    assert "review window" in decision.adjustments[0]
 
 
 def test_detect_bounds_uses_chat_decay_without_a_transcript(tmp_path: Path):

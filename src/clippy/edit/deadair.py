@@ -1,9 +1,9 @@
-"""Dead-air removal: cutting the parts of a clip nobody wants to watch (M4).
+"""Dead-air removal: cutting the parts of a clip nobody wants to watch.
 
 Two rules shape this stage:
 
 1. Only *dead* air is cuttable. A gap must be detected as silence by ffmpeg and - once
-   word timings exist (M5) - must not contain words, so quiet speech on a quiet stream
+   word timings exist - must not contain words, so quiet speech on a quiet stream
    is never mistaken for dead air.
 2. The payoff is sacred. Everything between `main_ts` and `payoff_ts` is protected, and
    total removal is capped so a clip cannot be gutted into something unwatchable.
@@ -232,9 +232,9 @@ def plan_deadair(
     """
     Decide which gaps to cut and which parts to keep.
 
-    `silences` are candidate gaps from ffmpeg; `words` (available from M5) veto any gap
-    they overlap so quiet speech is never cut; `protect` marks the payoff region that
-    must survive untouched.
+    `silences` are candidate gaps from ffmpeg; `words` veto any gap they overlap so
+    quiet speech is never cut; `protect` marks the payoff region that must survive
+    untouched.
     """
     duration = max(0.0, float(duration))
     mode = settings.deadair_mode

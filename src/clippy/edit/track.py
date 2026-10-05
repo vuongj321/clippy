@@ -1,4 +1,4 @@
-"""Subject tracking for vertical framing (M6).
+"""Subject tracking for vertical framing.
 
 The goal is narrow and honest: keep whatever is moving near the centre of a 9:16 crop,
 without a face detector. Frames are decoded as tiny grayscale images, frame-to-frame

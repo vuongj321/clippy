@@ -1,4 +1,4 @@
-"""Caption alignment: word timings into readable cues (M5).
+"""Caption alignment: word timings into readable cues.
 
 Captions have to be readable on a phone *and* stay in sync, so this module does the
 unglamorous work of grouping words: at most a couple of lines, bounded characters and

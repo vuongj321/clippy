@@ -47,7 +47,7 @@ ffprobe_path: ffprobe
 # caption_max_chat_messages: 40
 # caption_max_per_run: 20  # top-N extracted clips this run; the rest are never captioned
 
-# --- Phase 2: automated short-form edit (clippy-edit) ---
+# --- Automated short-form edit (clippy-edit) ---
 # HQ capture (clippy-capture, needs streamlink on PATH)
 capture_quality: best          # streamlink quality selector, e.g. best, 1080p60, 720p
 capture_downloader: streamlink # streamlink | yt_dlp
@@ -56,7 +56,7 @@ capture_downloader: streamlink # streamlink | yt_dlp
 clip_min_seconds: 10.0
 clip_max_seconds: 45.0
 hook_lookback_seconds: 30.0    # max walk-back to the setup line (transcript evidence)
-boundary_transcript_evidence: true   # ASR the Phase-1 window for word-timed bounds
+boundary_transcript_evidence: true   # ASR the detection window for word-timed bounds
 boundary_audio_evidence: false       # extra RMS decay evidence (noisier than words)
 reaction_tail_seconds: 3.0
 

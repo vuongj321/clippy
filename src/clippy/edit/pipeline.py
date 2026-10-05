@@ -1,8 +1,8 @@
-"""Edit pipeline orchestration (Phase 2).
+"""Edit pipeline orchestration.
 
-M0 scope: resolve candidates, build and persist an ``EditPlan``, and record a
-``renders`` row of kind ``plan``. The encoding stages land in M2-M9 and raise
-``NotImplementedError`` when ``dry_run=False``.
+Resolves candidates into jobs, builds and persists an ``EditPlan`` for each, runs the
+render stages when ``dry_run`` is false, and records ``renders`` rows for the plan and
+the final clip.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ def select_edit_jobs(jobs: list[EditJob], *, max_per_run: int) -> list[EditJob]:
     """
     Rank jobs and cap the batch.
 
-    Ranking matches the Phase 1 annotation pass: highest detection score first,
-    then earliest timestamp, then id, so a capped run is deterministic.
+    Highest detection score first, then earliest timestamp, then id, so a capped run
+    is deterministic.
     """
     if max_per_run <= 0 or not jobs:
         return []
@@ -152,9 +152,9 @@ def _boundary_context(
     """
     Everything boundary detection is allowed to look at.
 
-    Chat timestamps always; word timings from the Phase-1 review window when an ASR key is
-    configured and a real render (not ``dry_run``) is underway. Transcript evidence is cached
-    and best-effort: any failure leaves the clip on chat / Phase-1 bounds.
+    Chat timestamps always; word timings from the review window when an ASR key is
+    configured and a real render (not ``dry_run``) is underway. Transcript evidence is
+    cached and best-effort: any failure leaves the clip on chat / review-window bounds.
     """
     window_start = max(0.0, job.candidate.source_ts - job.candidate.pre_context_seconds)
     window_end = job.candidate.source_ts + job.candidate.post_context_seconds
@@ -235,7 +235,7 @@ def run_edit_pipeline(
 
     ``dry_run=True`` writes only ``plan.json`` plus a ``renders`` row, so it never
     touches ffmpeg or the network. ``chat_path`` supplies chat evidence so boundaries
-    come from the chat reaction curve instead of the Phase 1 window.
+    come from the chat reaction curve instead of the review window.
     """
     settings.ensure_dirs()
     db = Database(settings.resolved_db_path())
@@ -283,12 +283,12 @@ def run_edit_pipeline(
             decision = detect_bounds(
                 candidate=job.candidate, settings=settings, evidence=evidence
             )
-            if decision.bounds.method != "phase1_window":
+            if decision.bounds.method != "review_window":
                 evidence_bounds += 1
 
         # Bounds are re-derived whenever there is evidence (chat and/or transcript). The recorded
         # plan is only the fallback for a cut we cannot re-derive - a dry run, or a candidate with
-        # neither a chat dump nor a transcript - so the clip never resets to the Phase 1 window it
+        # neither a chat dump nor a transcript - so the clip never resets to the review window it
         # was cut away from.
         if decision is not None:
             bounds = decision.bounds

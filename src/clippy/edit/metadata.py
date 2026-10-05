@@ -1,4 +1,4 @@
-"""Metadata generation for the final clip (M9).
+"""Metadata generation for the final clip.
 
 Metadata is an **optimization layer**, never a quality mechanism: a render never fails
 because of it, and every field is validated against the transcript, chat and streamer

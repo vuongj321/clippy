@@ -1,8 +1,8 @@
-"""Render stages for one edit (Phase 2).
+"""Render stages for one edit: cut, dead-air removal, composition and encode.
 
-M3 scope: cut ``base.mp4`` from the source at the planned boundaries and verify what
-was actually produced. Later milestones add dead-air removal, layout, caption burn-in
-and the final encode here.
+``extract_base`` cuts the planned range out of the source, ``apply_deadair`` removes
+silence, and ``compose_vertical`` builds the vertical canvas with captions burned in,
+then encodes the result.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Audio normalization for the final clip (M8).
+"""Audio normalization for the final clip.
 
 Two-pass EBU R128: measure the clip, then apply `loudnorm` with the measured values
 (far more accurate than one-pass on a 30 s clip) plus a limiter guard.

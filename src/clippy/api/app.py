@@ -189,7 +189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         Create or re-render one candidate (the human escape hatch).
 
         A candidate that has never been planned is cut from scratch: `run_edit_pipeline` writes
-        `plan.json` and renders it, falling back to the Phase 1 detection window unless a chat dump
+        `plan.json` and renders it, falling back to the review window unless a chat dump
         is supplied. Options left unset stay at the `config.yaml` defaults.
         """
         if db.get_candidate(candidate_id) is None:

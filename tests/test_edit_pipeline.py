@@ -89,7 +89,7 @@ def test_dry_run_writes_plan_and_render_row(tmp_path: Path):
     assert plan.candidate_id == candidate.id
     assert plan.stream_id == stream.id
     assert plan.source_path == str(media)
-    assert plan.bounds.method == "phase1_window"
+    assert plan.bounds.method == "review_window"
     assert plan.bounds.duration == pytest.approx(45.0)
     assert plan.stage == "planned"
 
@@ -98,7 +98,7 @@ def test_dry_run_writes_plan_and_render_row(tmp_path: Path):
     assert renders[0].kind == "plan"
     assert renders[0].status == "ok"
     assert renders[0].path == str(paths.plan)
-    assert json.loads(renders[0].plan_json)["bounds"]["method"] == "phase1_window"
+    assert json.loads(renders[0].plan_json)["bounds"]["method"] == "review_window"
 
     # A dry run never claims the candidate has a finished edit.
     reloaded = db.get_candidate(candidate.id)
@@ -232,7 +232,7 @@ def test_chat_evidence_drives_boundaries(tmp_path: Path):
     assert plan.boundary_evidence is not None
     evidence = plan.boundary_evidence["evidence"]
     assert evidence["chat_burst_end_ts"] == pytest.approx(103.0)
-    # Evidence-driven bounds must not be labelled as a Phase 1 placeholder.
+    # Evidence-driven bounds must not be labelled as a review-window placeholder.
     assert WARN_BOUNDARIES_PENDING not in plan.warning_codes()
 
 
@@ -275,7 +275,7 @@ def test_replan_without_chat_keeps_the_chat_derived_bounds(tmp_path: Path):
     assert first.bounds.method == "signal_evidence"
 
     # A render submitted without a chat dump cannot re-derive the cut, so a re-plan must not reset the
-    # clip back to the Phase 1 window it was cut away from.
+    # clip back to the review window it was cut away from.
     run_edit_pipeline(settings=settings, candidate_ids=[candidate.id], dry_run=True)
 
     again = EditPlan.load(paths.plan)
@@ -316,7 +316,7 @@ def test_replan_from_a_different_source_ignores_the_recorded_bounds(tmp_path: Pa
 
     switched = EditPlan.load(EditPaths.for_candidate(settings, candidate.id).plan)
     assert switched.source_path == str(other)
-    assert switched.bounds.method == "phase1_window"
+    assert switched.bounds.method == "review_window"
     assert WARN_BOUNDARIES_PENDING in switched.warning_codes()
 
 
@@ -566,8 +566,8 @@ def test_auto_captions_follow_the_resolved_framing(monkeypatch, tmp_path: Path):
     assert style_line.split(",")[18] == "8"
 
 
-def test_boundary_context_reads_the_phase1_window(monkeypatch, tmp_path: Path):
-    """A render derives word timings from the Phase-1 window and maps them to source time."""
+def test_boundary_context_reads_the_review_window(monkeypatch, tmp_path: Path):
+    """A render derives word timings from the review window and maps them to source time."""
     from clippy.edit import pipeline as pipeline_module
 
     media = _media_file(tmp_path, "window.mp4")

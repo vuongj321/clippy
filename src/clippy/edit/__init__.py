@@ -12,7 +12,7 @@ from clippy.edit.plan import (
     EditPaths,
     EditPlan,
     build_plan,
-    phase1_bounds,
+    review_window_bounds,
 )
 from clippy.edit.pipeline import EditJob, resolve_jobs, run_edit_pipeline, select_edit_jobs
 
@@ -27,9 +27,9 @@ __all__ = [
     "build_plan",
     "detect_bounds",
     "evidence_from_chat",
-    "phase1_bounds",
     "refine_bounds_with_llm",
     "resolve_jobs",
+    "review_window_bounds",
     "run_edit_pipeline",
     "select_edit_jobs",
     "words_to_utterances",

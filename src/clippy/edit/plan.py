@@ -1,6 +1,6 @@
 """Edit plan: the serializable contract for one automated short-form edit.
 
-Every Phase 2 stage reads and writes the same ``EditPlan`` document
+Every edit stage reads and writes the same ``EditPlan`` document
 (``data/edits/{candidate_id}/plan.json``), so a render stays reproducible and
 reviewable without consulting the pipeline implementation.
 """
@@ -29,7 +29,7 @@ PlanStage = Literal[
     "complete",
     "failed",
 ]
-BoundsMethod = Literal["phase1_window", "signal_evidence", "llm_refined"]
+BoundsMethod = Literal["review_window", "signal_evidence", "llm_refined"]
 
 STRATEGIES = ("auto", "fit_blur", "irl", "gaming", "conversation")
 CAPTION_STYLES = ("karaoke_highlight", "block_pop", "minimal")
@@ -79,7 +79,7 @@ class ClipBounds:
     main_ts: float
     hook_ts: float
     payoff_ts: float
-    method: BoundsMethod = "phase1_window"
+    method: BoundsMethod = "review_window"
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -110,7 +110,7 @@ class ClipBounds:
             main_ts=float(_value(data, "main_ts", 0.0)),
             hook_ts=float(_value(data, "hook_ts", 0.0)),
             payoff_ts=float(_value(data, "payoff_ts", 0.0)),
-            method=_value(data, "method", "phase1_window"),
+            method=_value(data, "method", "review_window"),
             notes=str(_value(data, "notes", "")),
         )
 
@@ -517,13 +517,12 @@ def _clamp_span(
     return start, end
 
 
-def phase1_bounds(candidate: Candidate, settings: Settings) -> ClipBounds:
+def review_window_bounds(candidate: Candidate, settings: Settings) -> ClipBounds:
     """
-    Phase 1's review window, clamped to the configured short-form duration.
+    The detector's review window, clamped to the configured short-form duration.
 
-    Boundary detection proper (context analysis, hook/payoff snapping, dead-air
-    aware starts) lands in M2; until then a plan states this method explicitly so
-    no reviewer mistakes a placeholder for a decision.
+    The recorded `method` states these bounds came from the detection pass rather
+    than from evidence, so no reviewer mistakes a placeholder for a decision.
     """
     start = max(0.0, candidate.source_ts - candidate.pre_context_seconds)
     end = candidate.source_ts + candidate.post_context_seconds
@@ -543,8 +542,8 @@ def phase1_bounds(candidate: Candidate, settings: Settings) -> ClipBounds:
         main_ts=main_ts,
         hook_ts=hook_ts,
         payoff_ts=payoff_ts,
-        method="phase1_window",
-        notes="Phase 1 review window clamped to clip duration; M2 replaces this.",
+        method="review_window",
+        notes="review window clamped to the clip duration",
     )
 
 
@@ -561,7 +560,7 @@ def _upscale_factor(
 
     ``fit_blur`` scales the whole frame down/up to fit, so the binding axis is
     ``min``; crop strategies must cover the full canvas, so the binding axis is
-    ``max``. M6 refines this per layer once a real layout exists.
+    ``max``.
     """
     source_w = stream.source_width or 0
     source_h = stream.source_height or 0
@@ -642,7 +641,7 @@ def build_plan(
     Build the initial (planned-stage) edit plan for one candidate.
 
     `bounds`/`boundary_evidence` come from `edit.boundaries.detect_bounds`; when they
-    are omitted the Phase 1 window is used and the plan says so.
+    are omitted the review window is used and the plan says so.
     """
     overrides = overrides or EditOverrides()
     overrides.validate()
@@ -661,7 +660,7 @@ def build_plan(
         candidate_id=candidate.id,
         stream_id=candidate.stream_id,
         source_path=str(source_path),
-        bounds=bounds or phase1_bounds(candidate, settings),
+        bounds=bounds or review_window_bounds(candidate, settings),
         boundary_evidence=boundary_evidence,
         source_offset_seconds=(
             stream.source_offset_seconds
@@ -696,12 +695,12 @@ def build_plan(
     if bounds is None:
         plan.add_warning(
             WARN_BOUNDARIES_PENDING,
-            "Boundary detection (M2) has not run; bounds are the Phase 1 window clamped to the clip duration.",
+            "Boundary detection has not run; bounds are the review window clamped to the clip duration.",
         )
-    elif plan.bounds.method == "phase1_window":
+    elif plan.bounds.method == "review_window":
         plan.add_warning(
             WARN_BOUNDARIES_PENDING,
-            "boundary detection found no usable evidence; bounds are the Phase 1 window",
+            "boundary detection found no usable evidence; bounds are the review window",
         )
     if plan.layout.strategy == "auto" and not plan.layout.resolved_strategy:
         plan.add_warning(

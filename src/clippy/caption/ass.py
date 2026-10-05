@@ -1,4 +1,4 @@
-"""ASS subtitle writing for burned-in captions (M5).
+"""ASS subtitle writing for burned-in captions.
 
 libass is the renderer (ffmpeg's `ass` filter), so a generated file is the contract
 between the caption logic and the encoder. Two details matter:

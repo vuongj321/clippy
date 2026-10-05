@@ -224,7 +224,7 @@ def _verify_offset_with_clips(
     warnings: list[str],
 ) -> OffsetVerification | None:
     """
-    Prove the capture's offset by correlating existing Phase 1 clips against it.
+    Prove the capture's offset by correlating existing extracted clips against it.
 
     Chat-vs-audio correlation is only a heuristic (spiky things correlate with spiky
     things), so a confidently *applied* offset must come from comparing identical
@@ -242,7 +242,7 @@ def _verify_offset_with_clips(
     ]
     if not clips:
         warnings.append(
-            "no Phase 1 clips available to verify the offset; leaving it at 0 "
+            "no extracted clips available to verify the offset; leaving it at 0 "
             "(pass --source-offset if the capture did not start at the stream start)"
         )
         return None

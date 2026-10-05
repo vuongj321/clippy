@@ -662,7 +662,7 @@ so a run can stop, be inspected, and resumed:
 | `complete` | `final.mp4`, `metadata.json`, `thumbnail.jpg` | loudness-normalized and publishable |
 
 Boundary detection writes one more cache beside those, `boundary_transcript.json` (word-timed ASR
-of the Phase-1 review window); it is evidence for the cut rather than a stage artifact.
+of the review window); it is evidence for the cut rather than a stage artifact.
 
 Three rules keep the stages composable:
 
@@ -736,7 +736,7 @@ records, so a form submitted untouched re-plans layout and caption style from co
 the CLI follows. The labels say "config default" rather than implying the current choice is kept.
 
 A re-plan that is given no chat evidence keeps the boundaries already recorded in `plan.json` for
-the same source, rather than silently resetting the cut to the Phase 1 window; point it at a
+the same source, rather than silently resetting the cut to the review window; point it at a
 different source and the recorded bounds are discarded. Naming a chat dump in the form is what lets a
 re-render re-derive the cut from the chat reaction curve, which the CLI does with `--chat`.
 
@@ -1217,7 +1217,7 @@ example config is not identical to a bare `Settings()`.
 | `min_context_seconds` / `reaction_tail_seconds` | `1.5` / `3.0` | context kept before a cut, and reaction kept after the moment |
 | `boundary_min_silence_seconds` / `word_gap_min_seconds` | `0.35` / `0.08` | the shortest silence and word gap the boundary stage will cut on |
 | `boundary_llm_refine` | `false` | opt-in LLM refinement of the chosen bounds |
-| `boundary_transcript_evidence` | `true` | ASR the cached Phase-1 review window for word timings so the hook/end snap to real speech; degrades to chat / Phase-1 bounds on any failure |
+| `boundary_transcript_evidence` | `true` | ASR the cached review window for word timings so the hook/end snap to real speech; degrades to chat / review-window bounds on any failure |
 | `boundary_audio_evidence` | `false` | opt-in RMS-decay evidence (noisier than words) |
 | `extract_duration_tolerance_seconds` | `0.5` | how far `base.mp4` may deviate before the plan warns |
 | `deadair_enabled` / `deadair_mode` | `true` / `cut` | `cut` removes silence, `speed` shortens it |

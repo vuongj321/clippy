@@ -1,4 +1,4 @@
-"""Boundary detection: deciding where a clip starts and ends (M2).
+"""Boundary detection: deciding where a clip starts and ends.
 
 All times are stream-relative seconds, like every other stage.
 
@@ -28,7 +28,7 @@ from typing import Any, Callable, Sequence
 
 from clippy.caption.asr import TranscriptWord
 from clippy.config import Settings
-from clippy.edit.plan import ClipBounds, phase1_bounds
+from clippy.edit.plan import ClipBounds, review_window_bounds
 from clippy.store.db import Candidate
 
 logger = logging.getLogger(__name__)
@@ -394,7 +394,7 @@ def detect_bounds(
     evidence: ContextEvidence | None = None,
 ) -> BoundaryDecision:
     """
-    Decide the final bounds, degrading to the Phase 1 window when evidence is thin.
+    Decide the final bounds, degrading to the review window when evidence is thin.
 
     Bounds come back on the source (stream-relative) timeline with the evidence and
     every adjustment the constraint pass made, so a reviewer can see why the clip
@@ -403,7 +403,7 @@ def detect_bounds(
     context = evidence or ContextEvidence()
     notes: list[str] = []
     adjustments: list[str] = []
-    fallback = phase1_bounds(candidate, settings)
+    fallback = review_window_bounds(candidate, settings)
 
     if not (context.has_transcript() or context.has_audio() or context.chat_times):
         return BoundaryDecision(
@@ -412,7 +412,7 @@ def detect_bounds(
                 signal_peak_ts=candidate.source_ts,
                 notes=["no transcript, audio or chat evidence available"],
             ),
-            adjustments=["fell back to the Phase 1 window: no boundary evidence available"],
+            adjustments=["fell back to the review window: no boundary evidence available"],
         )
 
     search_start = max(0.0, candidate.source_ts - candidate.pre_context_seconds)
@@ -528,7 +528,7 @@ def detect_bounds(
     )
 
     if end_ts - start_ts <= 0:
-        adjustments.append("fell back to the Phase 1 window: no usable boundary evidence")
+        adjustments.append("fell back to the review window: no usable boundary evidence")
         return BoundaryDecision(bounds=fallback, evidence=evidence_out, adjustments=adjustments)
 
     bounds = ClipBounds(

@@ -1,4 +1,4 @@
-"""Caption stage for one edit (M5).
+"""Caption stage for one edit.
 
 Order matters: transcription runs on ``trimmed.mp4``, i.e. *after* dead-air removal, so
 every cue time already refers to the final timeline and nothing needs remapping.
@@ -105,7 +105,7 @@ def transcribe_window_words(
     Word-timed ASR for a review window, cached on disk. Never raises.
 
     Boundary detection needs word timings *before* the clip is cut, so this transcribes the
-    Phase-1 review window rather than the (not yet extracted) trimmed clip. Returns None when
+    review window rather than the (not yet extracted) trimmed clip. Returns None when
     there is no API key, the media is missing, or the endpoint fails, leaving the caller to
     degrade to whatever evidence it already has.
     """
@@ -185,7 +185,7 @@ def generate_captions(
     """
     Transcribe, align and write ``captions.ass`` for the trimmed clip.
 
-    `prefer_top` comes from composition (M6/M7): when the subject sits in the lower band
+    `prefer_top` comes from composition: when the subject sits in the lower band
     of the frame, captions move up so they never cover it. It only applies to
     `caption_safe_area: auto`; an explicit `top`/`middle`/`bottom` is a reviewer choice and
     wins over the frame evidence.

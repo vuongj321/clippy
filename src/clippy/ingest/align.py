@@ -1,4 +1,4 @@
-"""Timeline alignment between chat activity and audio energy (M1).
+"""Timeline alignment between chat activity and audio energy.
 
 Contract: ``estimate_timeline_offset`` returns the value that maps
 stream-relative seconds onto the captured media timeline::
@@ -288,7 +288,7 @@ def verify_offset_with_clips(
     Recover the true source offset by correlating existing clips against the capture.
 
     ``clips`` are ``(clip_path, clip_start_seconds)`` where the start is on the stream
-    clock (Phase 1 cut each candidate as ``[ts - pre_context, ts + post_context]``).
+    clock (each candidate was cut as ``[ts - pre_context, ts + post_context]``).
     Because both sides are the *same* audio content, a confident score is decisive in
     a way chat-vs-audio correlation never is. The median offset of the confident
     clips is returned so one bad clip cannot move the answer.

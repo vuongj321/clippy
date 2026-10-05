@@ -1,4 +1,4 @@
-"""HQ VOD capture (M1).
+"""HQ VOD capture.
 
 Same shape as ``ingest/live.py``: build a downloader argv, run it as a
 subprocess, then probe what landed so the ``streams`` row can record real source

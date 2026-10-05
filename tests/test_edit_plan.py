@@ -17,7 +17,7 @@ from clippy.edit.plan import (
     EditPaths,
     EditPlan,
     build_plan,
-    phase1_bounds,
+    review_window_bounds,
 )
 from clippy.store.db import Candidate, Stream
 
@@ -64,19 +64,19 @@ def _settings(tmp_path: Path, **overrides) -> Settings:
     return Settings(**base)  # type: ignore[arg-type]
 
 
-def test_phase1_bounds_clamps_60s_window_to_max(tmp_path: Path):
+def test_review_window_bounds_clamps_60s_window_to_max(tmp_path: Path):
     settings = _settings(tmp_path, clip_max_seconds=45.0)
-    bounds = phase1_bounds(_candidate(source_ts=100.0), settings)
+    bounds = review_window_bounds(_candidate(source_ts=100.0), settings)
     assert bounds.duration == pytest.approx(45.0)
     assert bounds.start == pytest.approx(77.5)
     assert bounds.end == pytest.approx(122.5)
     assert bounds.main_ts == pytest.approx(100.0)
-    assert bounds.method == "phase1_window"
+    assert bounds.method == "review_window"
 
 
-def test_phase1_bounds_expands_short_window_to_min(tmp_path: Path):
+def test_review_window_bounds_expands_short_window_to_min(tmp_path: Path):
     settings = _settings(tmp_path, clip_min_seconds=10.0)
-    bounds = phase1_bounds(
+    bounds = review_window_bounds(
         _candidate(source_ts=100.0, pre_context_seconds=2.0, post_context_seconds=2.0),
         settings,
     )
@@ -85,17 +85,17 @@ def test_phase1_bounds_expands_short_window_to_min(tmp_path: Path):
     assert bounds.end == pytest.approx(105.0)
 
 
-def test_phase1_bounds_never_starts_before_zero(tmp_path: Path):
+def test_review_window_bounds_never_starts_before_zero(tmp_path: Path):
     settings = _settings(tmp_path)
-    bounds = phase1_bounds(_candidate(source_ts=3.0), settings)
+    bounds = review_window_bounds(_candidate(source_ts=3.0), settings)
     assert bounds.start == 0.0
     assert bounds.end == pytest.approx(33.0)
     assert bounds.main_ts == pytest.approx(3.0)
 
 
-def test_phase1_bounds_keeps_hook_and_payoff_inside(tmp_path: Path):
+def test_review_window_bounds_keeps_hook_and_payoff_inside(tmp_path: Path):
     settings = _settings(tmp_path, hook_lookback_seconds=8.0, reaction_tail_seconds=3.0)
-    bounds = phase1_bounds(_candidate(source_ts=100.0), settings)
+    bounds = review_window_bounds(_candidate(source_ts=100.0), settings)
     assert bounds.start <= bounds.hook_ts <= bounds.main_ts
     assert bounds.main_ts <= bounds.payoff_ts <= bounds.end
     assert bounds.hook_ts == pytest.approx(92.0)
@@ -116,7 +116,7 @@ def test_build_plan_marks_placeholder_stage_and_warnings(tmp_path: Path):
         settings=settings,
     )
     assert plan.stage == "planned"
-    assert plan.bounds.method == "phase1_window"
+    assert plan.bounds.method == "review_window"
     assert WARN_BOUNDARIES_PENDING in plan.warning_codes()
     assert WARN_LAYOUT_PENDING in plan.warning_codes()
     # 720p into a 1080-wide fit is a downscale, so no upscale warning.

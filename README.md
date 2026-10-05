@@ -126,7 +126,7 @@ data/edits/<candidate_id>/
   trimmed.mp4          dead air removed
   captions.ass         caption track burned into the vertical render
   transcript.json      word timings
-  boundary_transcript.json  word-timed ASR of the Phase-1 review window (boundary evidence cache)
+  boundary_transcript.json  word-timed ASR of the review window (boundary evidence cache)
   layout.json          vertical layout segments
   vertical.mp4         1080x1920 with captions
   final.mp4            loudness-normalized deliverable

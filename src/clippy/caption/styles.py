@@ -1,4 +1,4 @@
-"""Caption styles: the knobs a reviewer can tune without touching ASS (M5)."""
+"""Caption styles: the knobs a reviewer can tune without touching ASS."""
 
 from __future__ import annotations
 

@@ -121,7 +121,7 @@ def test_list_candidates_filters(tmp_path: Path):
     assert len(db.list_candidates(stream_id=stream_id)) == 2
     assert len(db.list_candidates(ids=[candidate_id])) == 1
     assert db.list_candidates(ids=[9999]) == []
-    # Highest score first, per the Phase 1 queue convention.
+    # Highest score first, matching the detection queue order.
     assert db.list_candidates(stream_id=stream_id)[0].id == candidate_id
     db.review_candidate(candidate_id, "approved")
     assert [c.id for c in db.list_candidates(stream_id=stream_id, status="approved")] == [

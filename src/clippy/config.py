@@ -50,14 +50,14 @@ class Settings(BaseSettings):
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
 
-    # --- Phase 2: HQ capture (M1) ---
+    # --- HQ capture ---
     capture_quality: str = "best"
     capture_downloader: Literal["streamlink", "yt_dlp"] = "streamlink"
     capture_source_offset_seconds: float = 0.0
     source_budget_gb: float = 40.0
     alignment_tolerance_seconds: float = 1.0
 
-    # --- Phase 2: clip boundaries ---
+    # --- Clip boundaries ---
     clip_min_seconds: float = 10.0
     clip_max_seconds: float = 45.0
     clip_target_seconds: float = 30.0
@@ -69,12 +69,12 @@ class Settings(BaseSettings):
     word_gap_min_seconds: float = 0.08
     boundary_llm_refine: bool = False
     # Evidence sources for boundary detection. Transcript evidence costs one cached ASR call
-    # per candidate and degrades to chat / Phase-1 bounds on any failure.
+    # per candidate and degrades to chat / review-window bounds on any failure.
     boundary_transcript_evidence: bool = True
     boundary_audio_evidence: bool = False
     extract_duration_tolerance_seconds: float = 0.5
 
-    # --- Phase 2: dead-air removal ---
+    # --- Dead-air removal ---
     deadair_enabled: bool = True
     deadair_mode: Literal["cut", "speed"] = "cut"
     deadair_noise_db: float = -30.0
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     deadair_max_removed_ratio: float = 0.4
     deadair_speed_factor: float = 1.5
 
-    # --- Phase 2: burned-in captions ---
+    # --- Burned-in captions ---
     caption_enabled: bool = True
     caption_style: Literal["karaoke_highlight", "block_pop", "minimal"] = "karaoke_highlight"
     caption_font: str = "Arial"
@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     caption_fonts_dir: str = "C:/Windows/Fonts"
     asr_word_timestamps: bool = True
 
-    # --- Phase 2: vertical formatting ---
+    # --- Vertical formatting ---
     clip_target_width: int = 1080
     clip_target_height: int = 1920
     clip_fps: int = 30
@@ -130,7 +130,7 @@ class Settings(BaseSettings):
     facecam_pad: float = 1.6
     quality_warn_upscale: float = 2.0
 
-    # --- Phase 2: render + audio ---
+    # --- Render + audio ---
     render_dir: Path | None = None
     render_crf: int = 20
     intermediate_crf: int = 16
@@ -141,7 +141,7 @@ class Settings(BaseSettings):
     audio_true_peak: float = -1.5
     audio_limiter: bool = True
 
-    # --- Phase 2: metadata ---
+    # --- Metadata ---
     metadata_enabled: bool = True
     metadata_model: str = ""
     metadata_max_hashtags: int = 6
