@@ -287,7 +287,7 @@ def _render_segments(
         "-preset",
         settings.render_preset,
         "-crf",
-        str(settings.render_crf),
+        str(settings.intermediate_crf),
         "-pix_fmt",
         "yuv420p",
     ]

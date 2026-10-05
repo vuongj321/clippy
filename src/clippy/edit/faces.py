@@ -56,9 +56,10 @@ MIN_HIT_RATIO = 0.2
 MIN_FACE_HITS = 4
 
 # Clustering constants. A detection joins a cluster when its centre is within `CLUSTER_MAX_JUMP`
-# of that cluster's centre (a face cannot teleport between samples), and when its area is within
-# `CLUSTER_SIZE_RATIO` of the cluster's median - so a much bigger box (poster, cutscene, thumbnail)
-# starts its own cluster and has to earn the vote instead of merging into the real face.
+# of that cluster's most recent box (a face cannot teleport between samples), and when its area is
+# within `CLUSTER_SIZE_RATIO` of that same box - so a much bigger box (poster, cutscene, thumbnail)
+# starts its own cluster and has to earn the vote instead of merging into the real face. Matching
+# the most recent box rather than the cluster's median is what keeps a slowly drifting face whole.
 CLUSTER_MAX_JUMP = 0.15
 CLUSTER_SIZE_RATIO = 2.5
 

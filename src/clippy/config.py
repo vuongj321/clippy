@@ -104,9 +104,7 @@ class Settings(BaseSettings):
     caption_avoid_ratio: float = 0.25
     caption_uppercase: bool = True
     caption_fonts_dir: str = "C:/Windows/Fonts"
-    asr_provider: Literal["api", "ffmpeg_whisper"] = "api"
     asr_word_timestamps: bool = True
-    asr_whisper_model_path: str = ""
 
     # --- Phase 2: vertical formatting ---
     clip_target_width: int = 1080
@@ -137,10 +135,7 @@ class Settings(BaseSettings):
     render_crf: int = 20
     intermediate_crf: int = 16
     render_preset: str = "veryfast"
-    render_encoder: Literal["auto", "x264", "nvenc"] = "auto"
-    render_disk_budget_gb: float = 20.0
     edit_max_per_run: int = 20
-    keep_intermediate: bool = False
     audio_normalize: bool = True
     audio_target_lufs: float = -14.0
     audio_true_peak: float = -1.5

@@ -177,9 +177,6 @@ def edit_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--caption-emphasis", default=None, choices=CAPTION_EMPHASIS_MODES)
     parser.add_argument("--deadair-mode", default=None, choices=DEADAIR_MODES)
     parser.add_argument("--no-captions", action="store_true", help="Render without captions")
-    parser.add_argument(
-        "--keep-intermediate", action="store_true", help="Keep stage artifacts (base/trimmed)"
-    )
     parser.add_argument("--config", default=None, help="Optional config.yaml path")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
@@ -195,7 +192,6 @@ def edit_main(argv: list[str] | None = None) -> None:
         caption_emphasis=args.caption_emphasis,
         deadair_mode=args.deadair_mode,
         captions_enabled=False if args.no_captions else None,
-        keep_intermediate=True if args.keep_intermediate else None,
     )
 
     get_settings.cache_clear()

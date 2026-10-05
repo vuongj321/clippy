@@ -479,7 +479,6 @@ class EditOverrides:
     captions_enabled: bool | None = None
     crop_bias: float | None = None
     zoom: float | None = None
-    keep_intermediate: bool | None = None
     target_width: int | None = None
     target_height: int | None = None
 

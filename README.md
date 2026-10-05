@@ -81,8 +81,7 @@ including transcription.
 
 Useful flags: `--dry-run`, `--force`, `--strategy auto|fit_blur|irl|gaming|conversation`,
 `--caption-style karaoke_highlight|block_pop|minimal`, `--caption-emphasis heuristic|llm|off`,
-`--deadair-mode cut|speed`, `--no-captions`, `--keep-intermediate`, `--source <file>` and
-`--source-offset`.
+`--deadair-mode cut|speed`, `--no-captions`, `--source <file>` and `--source-offset`.
 
 Notes:
 
@@ -127,6 +126,7 @@ data/edits/<candidate_id>/
   trimmed.mp4          dead air removed
   captions.ass         caption track burned into the vertical render
   transcript.json      word timings
+  boundary_transcript.json  word-timed ASR of the Phase-1 review window (boundary evidence cache)
   layout.json          vertical layout segments
   vertical.mp4         1080x1920 with captions
   final.mp4            loudness-normalized deliverable
@@ -161,9 +161,9 @@ multiplier, audio spike multiplier, `disk_budget_gb`, `asr_model`, `caption_mode
 `caption_max_per_run`, `caption_max_chat_messages`, `openai_base_url`.
 
 Editing knobs: `clip_target_width`/`clip_target_height`/`clip_fps`, `layout_strategy`,
-`layout_track_backend`, `layout_smoothing`, `facecam_box` (an `"x,y,w,h"` box, or `auto` to derive
-it from the face track), `facecam_pad`, `quality_warn_upscale`, `render_crf`, `render_preset`,
-`caption_style`, `caption_emphasis`, `caption_*` sizing knobs, `deadair_*`,
+`layout_track_backend`, `layout_smoothing`, `layout_zoom`, `facecam_box` (an `"x,y,w,h"` box, or
+`auto` to derive it from the face track), `facecam_pad`, `quality_warn_upscale`, `render_crf`,
+`render_preset`, `caption_style`, `caption_emphasis`, `caption_*` sizing knobs, `deadair_*`,
 `audio_normalize`/`audio_target_lufs`/`audio_true_peak`/`audio_limiter`, `metadata_enabled`,
 `metadata_title_max_chars`, `metadata_max_hashtags`, `thumbnail_enabled`, `thumbnail_overlay_text`.
 

@@ -97,7 +97,6 @@ facecam_pad: 1.6              # headroom grown around the detected face before i
 # Render + audio + metadata
 render_crf: 20
 render_preset: medium          # libx264 preset
-render_encoder: auto           # auto | x264 | nvenc
 edit_max_per_run: 20
 audio_normalize: true
 audio_target_lufs: -14.0

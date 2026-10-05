@@ -444,8 +444,11 @@ output   = data/media/candidate_{candidate_id}.mp4
 SQLite, one file (`data/clippy.db`), no ORM. `Database` opens a short-lived connection per
 operation through a `connection()` context manager (`PRAGMA foreign_keys = ON`, commit on
 success, rollback on error). Schema create is idempotent (`CREATE TABLE IF NOT EXISTS`).
-Existing databases pick up new candidate columns through `CANDIDATE_COLUMN_MIGRATIONS`
-(`ALTER TABLE ... ADD COLUMN` for `extract_reason`, `caption`, `transcript` when missing).
+Existing databases pick up new columns through `TABLE_MIGRATIONS`: `CANDIDATE_COLUMN_MIGRATIONS`
+(`ALTER TABLE ... ADD COLUMN` for `extract_reason`, `caption`, `transcript`, `edit_status` and
+`edited_media_path` when missing) and `STREAM_COLUMN_MIGRATIONS` (the capture metadata columns
+`source_width`, `source_height`, `source_fps`, `capture_quality`, `source_offset_seconds` and
+`source_bytes`).
 
 ```mermaid
 erDiagram
@@ -466,6 +469,12 @@ erDiagram
     text source_url
     text vod_id
     text media_path
+    int source_width
+    int source_height
+    real source_fps
+    text capture_quality
+    real source_offset_seconds
+    int source_bytes
     text started_at
     text created_at
   }
@@ -652,6 +661,9 @@ so a run can stop, be inspected, and resumed:
 | `composed` | `vertical.mp4`, `compose.inputs.json` | 1080x1920, captions burned in |
 | `complete` | `final.mp4`, `metadata.json`, `thumbnail.jpg` | loudness-normalized and publishable |
 
+Boundary detection writes one more cache beside those, `boundary_transcript.json` (word-timed ASR
+of the Phase-1 review window); it is evidence for the cut rather than a stage artifact.
+
 Three rules keep the stages composable:
 
 1. **Times on the trimmed timeline.** Captions are transcribed from `trimmed.mp4`, so no cue
@@ -705,7 +717,7 @@ Anything a reviewer sees is therefore in `plan.json`: `layout.strategy` (request
 
 | surface | can change |
 | --- | --- |
-| CLI (`clippy-edit`) | `--strategy`, `--caption-style`, `--caption-emphasis`, `--deadair-mode`, `--no-captions`, `--force`, `--keep-intermediate` |
+| CLI (`clippy-edit`) | `--strategy`, `--caption-style`, `--caption-emphasis`, `--deadair-mode`, `--no-captions`, `--force` |
 | UI render form (create or re-render) | `strategy`, `caption_style`, `caption_emphasis`, `force` and an optional `chat_path` chat dump - `deadair_mode` is CLI/config-only, while `crop_bias`, `zoom`, `target_width` and `target_height` have `EditOverrides` fields (now honoured by composition) but no CLI flag or UI field yet |
 | `config.yaml` / `CLIPPY_*` env | everything else: target size and fps, fonts, colours, cue rules, `caption_safe_area`, track backend, `facecam_box` |
 
@@ -1027,8 +1039,10 @@ No API key, an ASR error, or an empty transcript leaves the plan explaining why 
 continues without burned-in text.
 
 **One video encode.** `compose_vertical` does crop/scale/overlay/concat/caption-burn in a single
-pass; `normalize_audio` then copies the video stream and re-encodes only audio. Intermediates
-are cut at `crf 16` so the final picture is not a second-generation encode of a lossy one.
+pass; `normalize_audio` then copies the video stream and re-encodes only audio. `base.mp4` is cut
+at `intermediate_crf` (16) to keep the source window clean, while `trimmed.mp4` (dead air) and
+`vertical.mp4` are encoded at `render_crf` (20) — only the source window carries the lower
+intermediate CRF.
 
 **Layouts are segments, not expressions.** A tracked crop becomes spans with a static rectangle
 each, concatenated in the same pass. A crop therefore only moves when the subject genuinely
@@ -1101,6 +1115,10 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 | `src/clippy/caption/chat_context.py` | Windowed, despammed chat payload for the caption model                                      |
 | `src/clippy/caption/asr.py`       | OpenAI-compatible Whisper transcription of the cut MP4                                           |
 | `src/clippy/caption/generate.py`  | `annotate_extracted_candidate`: ASR + short caption; never raises for missing keys/API errors     |
+| `src/clippy/caption/align.py`     | Word timings → readable cues, and the heuristic emphasis scorer (`pick_emphasis_words`)            |
+| `src/clippy/caption/styles.py`    | Caption style presets + `Settings` overrides, resolved to a `CaptionStyle`                         |
+| `src/clippy/caption/ass.py`       | ASS track writing: karaoke `\k` timings vs. plain recoloured text                                  |
+| `src/clippy/caption/emphasis.py`  | Optional LLM emphasis (`caption_emphasis: llm`) with transcript-membership validation              |
 | `src/clippy/ingest/capture.py`    | HQ VOD download (`streamlink`/`yt-dlp`), timeline alignment reporting, `data/source` pruning     |
 | `src/clippy/ingest/align.py`      | Chat-vs-media offset probe and clip-correlation verification (`verify_offset_with_clips`)         |
 | `src/clippy/edit/pipeline.py`     | Edit orchestration: `run_edit_pipeline`, job resolution/selection, stage sequencing                |
@@ -1120,7 +1138,8 @@ rejected, and any failure falls back to deterministic text with a recorded reaso
 | `src/clippy/ui/`                  | `templates/base.html`, `index.html`, `candidate.html`; `static/style.css`                          |
 | `tests/test_core.py`              | Chat loading, keyword boundaries, coalescing, chat+audio boosting, DB review/caption round-trip    |
 | `tests/test_caption.py`           | Extract reasons, chat-context despam, caption HTTP parse, per-run cap, skip-without-key, migrations |
-| `tests/test_edit_*.py`            | Editing maths and stages, cache fingerprints, the edit API, and ffmpeg-gated end-to-end renders     |
+| `tests/test_api_edit.py`          | The edit HTTP surface via `TestClient`: create/re-render, chat-evidence errors, metadata edits       |
+| `tests/test_edit_*.py`            | Editing maths and stages, cache fingerprints, and ffmpeg-gated end-to-end renders                    |
 | `tests/test_edit_faces.py`        | Face detection: box selection, hit-ratio gating, backend fallback with and without OpenCV           |
 | `tests/test_ingest_capture_align.py` | Downloader argv building, timeline offset estimation, source pruning                             |
 
@@ -1140,8 +1159,8 @@ inside its functions.
 
 Layered as: **`config.yaml` (init kwargs) → `CLIPPY_*` env vars → `.env` file → field
 defaults**. YAML takes precedence over environment variables here because YAML is passed as
-pydantic-settings *init* arguments, which rank highest in the source priority order — the
-comment in `config.example.yaml` claiming env vars override YAML is inaccurate. Verified:
+pydantic-settings *init* arguments, which rank highest in the source priority order (the
+`config.example.yaml` header says the same). Verified:
 `CLIPPY_PORT=9999` with `port: 8000` in `config.yaml` resolves to `8000`. `get_settings()` is
 `lru_cache`d, and every CLI entry point calls `get_settings.cache_clear()` so `--config` works.
 
@@ -1180,7 +1199,7 @@ comment in `config.example.yaml` claiming env vars override YAML is inaccurate. 
 
 ### Editing
 
-These are the knobs the edit pipeline reads. Defaults are the `Settings` defaults in
+These are the knobs the edit pipeline exposes. Defaults are the `Settings` defaults in
 `src/clippy/config.py`; `config.example.yaml` is the annotated starting point and deliberately
 changes a couple of them (`render_preset: medium`, `thumbnail_overlay_text: true`), so a copied
 example config is not identical to a bare `Settings()`.
@@ -1214,16 +1233,15 @@ example config is not identical to a bare `Settings()`.
 | `caption_max_chars_per_line` / `caption_max_lines` | `18` / `2` | character budget for one cue (36 by default) |
 | `caption_max_cue_seconds` / `caption_min_cue_seconds` / `caption_break_gap_seconds` | `2.2` / `0.5` / `0.35` | cue length bounds, and the pause that ends a cue |
 | `caption_margin_v` | `260` | distance from the bottom (or top) edge; it does not move the middle band |
-| `asr_provider` / `asr_word_timestamps` / `asr_whisper_model_path` | `api` / `true` / `""` | transcription backend, whether word timings are requested, and a local model path |
+| `asr_word_timestamps` | `true` | request word timings from the transcription endpoint; a server that refuses them is retried segment-only and the times are interpolated |
 | `clip_target_width` / `clip_target_height` / `clip_fps` | `1080` / `1920` / `30` | deliverable size and frame rate (`clip_fps: 0` follows the source) |
 | `layout_strategy` / `layout_track_backend` | `auto` / `motion` | how the frame is reframed, and what drives the crop |
 | `layout_smoothing` / `layout_zoom` | `0.12` / `1.0` | crop-pan responsiveness, and the zoom clamp |
 | `facecam_box` | `""` | `"x,y,w,h"`; fractions when the values are `<= 1`, else pixels |
 | `face_detection_width` / `face_min_size_ratio` / `face_min_hit_ratio` / `face_min_hits` | `480` / `0.06` / `0.2` / `4` | face backend only: the frame size the cascade sees, the smallest believable face, the share of frames the chosen face must appear in, and the minimum detections to be a candidate at all |
 | `quality_warn_upscale` | `2.0` | upscale factor above which a plan carries `upscale_exceeds_threshold` |
-| `render_crf` / `intermediate_crf` / `render_preset` | `20` / `16` / `veryfast` | encode quality of the deliverable, of the intermediates, and the x264 speed/size preset |
-| `render_encoder` | `auto` | `auto`, `x264` or `nvenc` |
-| `render_disk_budget_gb` / `edit_max_per_run` / `keep_intermediate` | `20.0` / `20` / `false` | render disk cap, batch size per run, and whether intermediates are kept |
+| `render_crf` / `intermediate_crf` / `render_preset` | `20` / `16` / `veryfast` | encode quality of the deliverable and of the intermediates, and the x264 speed/size preset. `base.mp4` and `trimmed.mp4` use `intermediate_crf`; only `vertical.mp4` uses `render_crf` |
+| `edit_max_per_run` | `20` | batch size per run |
 | `audio_normalize` / `audio_target_lufs` / `audio_true_peak` / `audio_limiter` | `true` / `-14.0` / `-1.5` / `true` | two-pass loudness normalization and its targets |
 | `metadata_enabled` / `metadata_model` | `true` / `""` | metadata generation, and an optional model override |
 | `metadata_title_max_chars` / `metadata_max_hashtags` | `60` / `6` | the caps validation applies to whatever the model proposes |
@@ -1292,6 +1310,8 @@ stated reason, so the next person can judge whether the tradeoff still holds.
 | editing | Review re-render is synchronous | One clip takes seconds, and a reviewer expects to wait | A job queue |
 | editing | Vertical framing is inert on a 16:9 capture | A 9:16 crop of a 16:9 frame already uses the whole height, so there is no headroom to move within: the tracked vertical position changes framing only for sources taller than 9:16, though it always informs the caption band | A taller source, or a crop that zooms in far enough to create headroom |
 | editing | Face detection is frontal-only and opt-in | `layout_track_backend: opencv` uses the cascade bundled with the wheel, so it needs no model download and never runs unless asked; it misses profile faces and can be fooled by face-like patterns. The clip-wide clustering vote (see [Layout strategies](#layout-strategies-layout_strategy)) rejects faces seen in fewer than `face_min_hit_ratio` of frames, so a hallucinated or transient face has to beat the real one across the whole clip rather than win a single frame | A DNN detector (OpenCV 5's `FaceDetectorYN` with a downloaded model, or mediapipe) behind the same seam, which would also remove the opt-in |
+| editing | Transcription (ASR) is API-only; there is no local or offline path | Every realistic run has an API key, and the API path already degrades to a caption-less render when the key is unset or a request fails | Add an `asr_provider` setting with a local ggml model behind an ffmpeg `whisper` filter, reusing the `transcribe_words` seam |
+| editing | `data/edits` is never pruned, so superseded render revisions accumulate on disk | Renders are tens of MB and re-rendering is deliberate, so growth is slow | Size the edits dir before a render and delete the files of superseded revisions (`renders.is_current = 0`), mirroring `within_disk_budget` on the extraction side |
 
 These seams are all additive. A new signal module only has to return event objects with `ts`,
 `kind`, `score`, and `details`; `combine_signal_events` and the storage layer already accept

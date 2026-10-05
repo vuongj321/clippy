@@ -17,6 +17,7 @@ from clippy.edit.render import (
     WARN_EXTRACT_SHORT,
     _cache_is_fresh,
     _composition_inputs,
+    _render_segments,
     apply_deadair,
     build_composition_filter,
     compose_vertical,
@@ -465,6 +466,35 @@ def test_apply_deadair_copies_base_when_nothing_is_cuttable(tmp_path: Path):
     # The trimmed artifact still exists so later stages have one timeline to read.
     assert paths.trimmed.exists()
     assert paths.trimmed.stat().st_size == paths.base.stat().st_size
+
+
+def test_deadair_render_keeps_the_intermediate_crf(monkeypatch, tmp_path: Path):
+    """
+    A cut re-encode produces an intermediate, so it keeps the master CRF rather than the
+    deliverable one - otherwise the crf-16 `base.mp4` is spent on a crf-20 `trimmed.mp4`
+    before the final encode ever runs.
+    """
+    settings = _settings(tmp_path, render_crf=20, intermediate_crf=16)
+    base = tmp_path / "base.mp4"
+    base.write_bytes(b"base")
+    output = tmp_path / "trimmed.mp4"
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        Path(cmd[-1]).write_bytes(b"mp4")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr("clippy.edit.render.probe_streams", lambda *a, **k: (True, True))
+    monkeypatch.setattr("clippy.edit.render.subprocess.run", fake_run)
+
+    _render_segments(
+        base, output, segments=[(0.0, 5.0, 1.0)], settings=settings, force=True
+    )
+
+    assert output.exists()
+    crf = commands[-1][commands[-1].index("-crf") + 1]
+    assert crf == "16"
 
 
 def test_plan_composition_derives_a_facecam_box_when_asked(monkeypatch, tmp_path: Path):
