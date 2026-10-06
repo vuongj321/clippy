@@ -135,6 +135,9 @@ class Settings(BaseSettings):
     render_crf: int = 20
     intermediate_crf: int = 16
     render_preset: str = "veryfast"
+    # A cut can only start the picture on a keyframe, so an extraction seeks this far back and
+    # trims both streams to the same window; it has to clear one GOP of the source.
+    extract_preroll_seconds: float = 3.0
     edit_max_per_run: int = 20
     audio_normalize: bool = True
     audio_target_lufs: float = -14.0

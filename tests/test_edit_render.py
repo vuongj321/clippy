@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -291,7 +293,12 @@ def test_build_composition_filter_composes_and_burns_captions(tmp_path: Path):
     )
 
     assert "color=c=black:s=1080x1920:r=30:d=2.000[bg0]" in graph
-    assert "[0:v]trim=start=0.000:end=2.000,setpts=PTS-STARTPTS[sv0]" in graph
+    # fit_blur stacks a blurred fill and the video, so the reset source is split for both.
+    assert (
+        "[0:v]trim=start=0.000:end=2.000,setpts=PTS-STARTPTS,split=2[sv0_0][sv0_1]"
+        in graph
+    )
+    assert "[sv0_0]crop=" in graph and "[sv0_1]crop=" in graph
     assert "[0:a]atrim=start=0.000:end=2.000,asetpts=PTS-STARTPTS[sa0]" in graph
     assert "boxblur=" in graph
     assert "ass=filename=captions.ass:fontsdir=C\\\\:/Windows/Fonts[vout]" in graph
@@ -312,10 +319,146 @@ def test_build_composition_filter_without_audio_or_captions(tmp_path: Path):
     )
     graph = build_composition_filter(layout, has_audio=False)
 
+    assert ",split=2[sv0_0][sv0_1]" in graph
     assert "[0:a]" not in graph
     assert "concat=n=1:v=1:a=0[catv]" in graph
     assert "[catv]null[vout]" in graph
     assert "ass=" not in graph
+
+
+def test_build_composition_filter_gives_every_layer_its_own_source(tmp_path: Path):
+    """
+    Each layer reads its own split of the reset source, because ffmpeg hands a labelled stream to
+    exactly one reader: a second reader is given the frames of a cloned chain that was fed the raw
+    input, so its `setpts` never runs and it keeps whatever offset the cut carries (0.8167s on
+    candidate 28). Reading `[sv0]` twice is what composited the facecam 0.82s late - the black
+    panel over the first 0.83s, and then a layer that never caught up.
+    """
+    for requested, box in (
+        ("gaming", [0.7, 0.05, 0.28, 0.3]),
+        ("fit_blur", None),
+        ("conversation", None),
+    ):
+        layout = plan_layout(
+            requested=requested,
+            source_width=1920,
+            source_height=1080,
+            width=1080,
+            height=1920,
+            fps=30,
+            duration=2.0,
+            settings=Settings(data_dir=tmp_path),  # type: ignore[arg-type]
+            facecam_box=box,
+        )
+        layers = layout.segments[0].layers
+        graph = build_composition_filter(layout, has_audio=True)
+
+        assert len(layers) == 2, f"{requested} should stack two layers"
+        assert ",split=2[sv0_0][sv0_1]" in graph
+        for layer_index in range(len(layers)):
+            assert f"[sv0_{layer_index}]crop=" in graph
+
+        # Every label is written once and read once, except the two that are mapped out of the
+        # graph by `compose_vertical`.
+        for label, reads in Counter(re.findall(r"\[([A-Za-z0-9_]+)\]", graph)).items():
+            if ":" in label:  # an input pad may be read once per segment
+                continue
+            expected = 1 if label in {"vout", "aout"} else 2
+            assert reads == expected, f"[{label}] is read {reads} times in\n{graph}"
+
+
+def test_composition_frame_locks_the_facecam_to_the_gameplay(tmp_path: Path):
+    """
+    The end-to-end shape of the defect: a cut whose video timestamps do not start at 0 (which is
+    what `extract_window` used to write) must still compose every layer from the same instant. The
+    facecam panel used to composite nothing until the offset elapsed, so the black canvas showed
+    through it.
+    """
+    trimmed = tmp_path / "trimmed.mp4"
+    # A colourful 3s window whose *video* timestamps do not start at 0, which is what
+    # `extract_window` used to write: the audio starts at 0, the video 0.8167s later.
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=25:duration=3",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=3",
+            "-vf",
+            "setpts=PTS+0.816667/TB",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            "-c:a",
+            "aac",
+            str(trimmed),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    layout = plan_layout(
+        requested="gaming",
+        source_width=640,
+        source_height=360,
+        width=540,
+        height=960,
+        fps=25,
+        duration=3.0,
+        settings=_settings(tmp_path),
+        facecam_box=[0.6, 0.05, 0.32, 0.3],
+    )
+    output = tmp_path / "vertical.mp4"
+    graph = build_composition_filter(layout, has_audio=False)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(trimmed),
+            "-filter_complex",
+            graph,
+            "-map",
+            "[vout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            str(output),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    panel = max(layout.segments[0].layers, key=lambda layer: layer.z)
+    panel_x, panel_y, panel_w, panel_h = (round(value) for value in panel.dst)
+    probe = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "info",
+            "-i",
+            str(output),
+            "-vf",
+            f"crop={panel_w}:{panel_h}:{panel_x}:{panel_y},blackdetect=d=0.04:pix_th=0.10",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert "black_start" not in probe.stderr, probe.stderr[-2000:]
 
 
 def _silence_fixture(tmp_path: Path) -> Path:
@@ -525,8 +668,9 @@ def test_plan_composition_derives_a_facecam_box_when_asked(monkeypatch, tmp_path
     assert layout.facecam_box_source == "auto"
     assert layout.facecam_box is not None
     assert WARN_FACECAM_DERIVED in layout.warnings
-    # A 22%-wide tile shaped to the gaming panel (1080:760) and centred on the face at (0.75, 0.2).
-    assert plan.layout.facecam_box == pytest.approx([0.64, 0.0624, 0.22, 0.2752], abs=1e-3)
+    # A 22%-wide tile shaped to the gaming panel (1080:768, flush against the gameplay) and centred
+    # on the face at (0.75, 0.2).
+    assert plan.layout.facecam_box == pytest.approx([0.64, 0.0609, 0.22, 0.2781], abs=1e-3)
     assert plan.layout.facecam_box_source == "auto"
     # The whole point: the derived box must actually contain the face.
     x, y, w, h = plan.layout.facecam_box

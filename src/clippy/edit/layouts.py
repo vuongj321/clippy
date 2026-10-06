@@ -51,7 +51,11 @@ WARN_FACECAM_AUTO_FAILED = "facecam_box_auto_failed"
 
 MIN_TRACKED_SOURCE_HEIGHT = 720
 BLUR_SIGMA = 24
+# Separator between the two conversation panels. The gaming facecam is flush against the gameplay
+# above it and the frame bottom below it, so the webcam and the game read as one stacked picture
+# instead of leaving a black stripe - and so a strip of the game can never show under the webcam.
 PANEL_GAP = 8
+GAMING_PANEL_GAP = 0
 GAMEPLAY_RATIO = 0.6
 TRACK_DEADBAND = 0.02
 MAX_TRACK_SEGMENTS = 24
@@ -813,7 +817,7 @@ def gaming_panel_aspect(width: float, height: float) -> float:
     `_crop_inside` from re-cropping the tile and shifting it off the face.
     """
     gameplay_h = round(height * GAMEPLAY_RATIO)
-    panel_h = max(1.0, height - gameplay_h - PANEL_GAP)
+    panel_h = max(1.0, height - gameplay_h - GAMING_PANEL_GAP)
     return width / panel_h
 
 
@@ -840,13 +844,13 @@ def _gaming_layers(
         )
     ]
     if facecam is not None:
-        panel_h = float(height - gameplay_h - PANEL_GAP)
+        panel_h = float(height - gameplay_h - GAMING_PANEL_GAP)
         panel_src = _crop_inside(facecam, width / panel_h, center_x=0.5, center_y=0.5)
         layers.append(
             LayoutLayer(
                 kind="panel",
                 src=panel_src,
-                dst=(0.0, float(gameplay_h + PANEL_GAP), width, panel_h),
+                dst=(0.0, float(gameplay_h + GAMING_PANEL_GAP), width, panel_h),
                 z=2,
             )
         )

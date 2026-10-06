@@ -272,8 +272,11 @@ def test_plan_layout_gaming_stacks_gameplay_and_facecam(tmp_path: Path):
     gameplay, facecam = plan.segments[0].layers
     assert gameplay.dst == (0.0, 0.0, 1080.0, 1152.0)
     assert facecam.dst[0] == 0.0
-    assert facecam.dst[1] == pytest.approx(1160.0)
-    assert facecam.dst[3] == pytest.approx(760.0)
+    # The webcam is flush against the gameplay above it and the frame bottom below it, so no stripe
+    # of the game can show underneath or between them.
+    assert facecam.dst[1] == pytest.approx(1152.0)
+    assert facecam.dst[3] == pytest.approx(768.0)
+    assert facecam.dst[1] + facecam.dst[3] == pytest.approx(1920.0)
     assert plan.caption_prefer_top is True
 
 

@@ -310,3 +310,60 @@ def test_face_track_ignores_a_face_seen_in_too_few_frames(monkeypatch):
     assert all(point.x == pytest.approx(0.15) for point in points)
 
 
+
+def _seam_frames(rows: int = 64, cols: int = 48, seam: int | None = None) -> np.ndarray:
+    """Flat frames, optionally with a hard step where a painted overlay would end."""
+    frames = np.full((3, rows, cols), 90, dtype=np.uint8)
+    if seam is not None:
+        frames[:, seam:, :] = 190
+    return frames
+
+
+def test_snap_facecam_box_moves_a_bottom_edge_onto_the_overlay_seam():
+    """
+    A tile derived from the *face* is not the rectangle the streamer drew, so it can overshoot the
+    webcam - and because the panel is flush with the frame, whatever it overshoots by is on screen.
+    The overlay's own border is a hard seam, which is what the snap locks onto.
+    """
+    frames = _seam_frames(seam=40)
+    box = (0.0, 0.0, 1.0, 45 / 64)  # five rows past the seam
+
+    snapped, strength = faces.snap_facecam_box_to_edge(frames, box)
+
+    assert snapped[3] == pytest.approx(40 / 64, abs=0.02)
+    assert strength >= 8.0
+
+
+def test_snap_facecam_box_leaves_a_frame_without_a_seam_alone():
+    """No clean step in the band means the derived box is the one that goes to the renderer."""
+    box = (0.0, 0.0, 1.0, 45 / 64)
+
+    snapped, strength = faces.snap_facecam_box_to_edge(_seam_frames(), box)
+
+    assert snapped == box
+    assert strength == 0.0
+
+
+def test_snap_facecam_box_never_cuts_into_the_face():
+    """Whatever the seam says, the tile still has to frame the face it was derived from."""
+    box = (0.0, 0.0, 1.0, 45 / 64)
+    # Centre (0.5, 43/64) with a 0.1-tall face reaches below the seam, so pulling the bottom up to
+    # row 40 would crop the chin and the snap has to be refused.
+    face = [TrackPoint(t=0.0, x=0.5, y=43 / 64, width=0.4, height=0.1)]
+
+    snapped, strength = faces.snap_facecam_box_to_edge(_seam_frames(seam=40), box, track=face)
+
+    assert snapped == box
+    assert strength == 0.0
+
+
+def test_snap_facecam_box_ignores_an_empty_decode():
+    box = (0.0, 0.0, 1.0, 45 / 64)
+
+    snapped, strength = faces.snap_facecam_box_to_edge(
+        np.zeros((0, 64, 48), dtype=np.uint8), box
+    )
+
+    assert snapped == box
+    assert strength == 0.0
+

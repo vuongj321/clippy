@@ -473,3 +473,153 @@ def face_track(
     return _track_from_cluster(winner, total_frames=total, sample_fps=sample_fps)
 
 
+def _median_face_box(track: Sequence[TrackPoint]) -> FaceBox | None:
+    """The steady face rectangle - the guard a snapped tile still has to frame."""
+    boxes = [point for point in track if point.width > 0 and point.height > 0]
+    if not boxes:
+        return None
+    # `TrackPoint.x/y` is the face's *centre* and `width/height` is its size, so the guard is the
+    # rectangle around that centre rather than a corner-anchored box.
+    face_w = _median([point.width for point in boxes])
+    face_h = _median([point.height for point in boxes])
+    return (
+        _median([point.x for point in boxes]) - face_w / 2.0,
+        _median([point.y for point in boxes]) - face_h / 2.0,
+        face_w,
+        face_h,
+    )
+
+
+def _contains(inner: FaceBox | None, outer: FaceBox) -> bool:
+    if inner is None:
+        return True
+    ix, iy, iw, ih = inner
+    ox, oy, ow, oh = outer
+    slack = 1e-6
+    return (
+        ox <= ix + slack
+        and oy <= iy + slack
+        and ox + ow >= ix + iw - slack
+        and oy + oh >= iy + ih - slack
+    )
+
+
+def _strongest_seam(
+    scores: np.ndarray,
+    rows: range,
+    *,
+    floor: float,
+    ratio: float,
+) -> tuple[int, float] | None:
+    """
+    The row with the strongest seam to the row below, when it is really a seam.
+
+    A painted overlay edge is a *step* in the picture, so it has to clear both an absolute floor and
+    a multiple of what the rest of the band looks like. Requiring the ratio as well is what keeps a
+    merely busy stretch of the frame from being mistaken for the webcam's border.
+    """
+    band = [(row, float(scores[row])) for row in rows if 0 <= row < len(scores)]
+    if not band:
+        return None
+    typical = float(np.median([score for _row, score in band]))
+    row, strength = max(band, key=lambda item: item[1])
+    if strength < floor or strength < ratio * max(typical, 1e-6):
+        return None
+    return row, strength
+
+
+def snap_facecam_box_to_edge(
+    frames: np.ndarray,
+    box: FaceBox,
+    *,
+    track: Sequence[TrackPoint] | None = None,
+    max_shift_ratio: float = 0.15,
+    min_edge_strength: float = 8.0,
+    min_edge_ratio: float = 2.5,
+    min_height_ratio: float = 0.25,
+) -> tuple[FaceBox, float]:
+    """
+    Move a derived facecam tile's horizontal edges onto the webcam overlay's own seams.
+
+    A tile derived from the *face* is not the rectangle the streamer drew, so it can run past the
+    webcam and put a strip of the game at the bottom of the panel - the panel is flush with the
+    frame, so whatever the tile overshoots by ends up on screen. The overlay is painted over the
+    frame, which makes its boundary a hard seam: for every row in a band around the tile's top and
+    bottom, measure the mean absolute difference to the row below across the tile's width, take the
+    median over the sampled frames, and snap an edge onto the strongest seam.
+
+    Returns the (possibly moved) box and the seam strength that justified the move (0.0 when the box
+    is untouched). The box is left exactly as it was when there is no frame to read, no seam that
+    clearly beats the local noise, a move longer than `max_shift_ratio` of the tile, or a move that
+    would stop the tile framing the tracked face.
+    """
+    if frames.size == 0:
+        return box, 0.0
+    _total, height, width = frames.shape
+    ox, oy, ow, oh = box
+    if width < 16 or height < 16 or ow <= 0 or oh <= 0:
+        return box, 0.0
+
+    x0 = max(0, min(int(round(ox * width)), width - 1))
+    x1 = min(width, max(x0 + 1, int(round((ox + ow) * width))))
+    y0 = max(0, min(int(round(oy * height)), height - 1))
+    y1 = min(height, max(y0 + 1, int(round((oy + oh) * height))))
+    tile_rows = y1 - y0
+    if x1 - x0 < 8 or tile_rows < 8:
+        return box, 0.0
+
+    # Seam strength per row, median over frames so a single odd frame cannot invent an edge.
+    deltas = np.abs(np.diff(frames.astype(np.int16), axis=1))[:, :, x0:x1]
+    scores = np.median(deltas.mean(axis=2), axis=0)
+
+    band = max(3, int(round(0.12 * tile_rows)))
+    limit = max(1, int(round(max_shift_ratio * tile_rows)))
+    min_rows = max(8, int(round(min_height_ratio * tile_rows)))
+    protect = _median_face_box(track) if track else None
+
+    top_seam = _strongest_seam(
+        scores,
+        range(max(0, y0 - band), min(len(scores) - 1, y0 + band) + 1),
+        floor=min_edge_strength,
+        ratio=min_edge_ratio,
+    )
+    bottom_seam = _strongest_seam(
+        scores,
+        range(max(0, y1 - 1 - band), min(len(scores) - 1, y1 - 1 + band) + 1),
+        floor=min_edge_strength,
+        ratio=min_edge_ratio,
+    )
+
+    edge_top, edge_bottom, strength = y0, y1, 0.0
+    for seam, is_top in ((bottom_seam, False), (top_seam, True)):
+        if seam is None:
+            continue
+        row, score = seam
+        candidate = row + 1  # the first row *below* the seam
+        if is_top:
+            if abs(candidate - edge_top) > limit or edge_bottom - candidate < min_rows:
+                continue
+            new_top, new_bottom = candidate, edge_bottom
+        else:
+            if abs(candidate - edge_bottom) > limit or candidate - edge_top < min_rows:
+                continue
+            new_top, new_bottom = edge_top, candidate
+        framed = (
+            x0 / width,
+            new_top / height,
+            (x1 - x0) / width,
+            (new_bottom - new_top) / height,
+        )
+        if not _contains(protect, framed):
+            continue
+        edge_top, edge_bottom = new_top, new_bottom
+        strength = max(strength, score)
+
+    if edge_top == y0 and edge_bottom == y1:
+        return box, 0.0
+    return (
+        (x0 / width, edge_top / height, (x1 - x0) / width, (edge_bottom - edge_top) / height),
+        strength,
+    )
+
+

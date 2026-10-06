@@ -38,18 +38,24 @@ from clippy.edit.layouts import (
     plan_layout,
 )
 from clippy.edit.plan import WARN_LAYOUT_PENDING
-from clippy.edit.track import track_subject
+from clippy.edit import faces
+from clippy.edit.track import TrackPoint, track_subject
 from clippy.extract.ffmpeg_cut import extract_window
 
 logger = logging.getLogger(__name__)
 
 WARN_EXTRACT_SHORT = "extract_short"
+WARN_EXTRACT_HEAD = "extract_head_missing"
 WARN_DEADAIR_LENGTH = "deadair_length_mismatch"
 WARN_COMPOSE_LENGTH = "compose_length_mismatch"
 
 # Bump when the fingerprint of what `vertical.mp4` depends on changes shape, so an older
 # sidecar can never be mistaken for a match.
 COMPOSE_INPUTS_VERSION = 1
+
+# The seam the derived-facecam snap looks for is painted into the frame, so a second of video is
+# already far more than enough to find it.
+FACECAM_SNAP_SECONDS = 2.0
 
 
 def extract_base(
@@ -80,7 +86,7 @@ def extract_base(
     if expected <= 0:
         raise ValueError(f"plan has no duration: start={start} end={end}")
 
-    extract_window(
+    cut = extract_window(
         source,
         paths.base,
         start_seconds=start,
@@ -88,10 +94,38 @@ def extract_base(
         ffmpeg_path=settings.ffmpeg_path,
         crf=settings.intermediate_crf,
         preset=settings.render_preset,
+        preroll_seconds=settings.extract_preroll_seconds,
     )
     actual = probe_duration_seconds(paths.base, ffprobe_path=settings.ffprobe_path)
     if actual <= 0:
         raise RuntimeError(f"ffmpeg produced an empty clip: {paths.base}")
+
+    if cut.head_seconds > 0:
+        # The source holds no decodable video at the planned start even after seeking back a whole
+        # GOP (a damaged keyframe), so the cut begins where the picture does. The plan has to
+        # follow it: every clip-relative conversion subtracts `bounds.start`, and leaving that
+        # behind would point the protect span and the caption offsets `head_seconds` too early.
+        shifted = start + cut.head_seconds
+        plan.bounds = replace(
+            plan.bounds,
+            start=shifted,
+            end=shifted + expected,
+            main_ts=max(shifted, plan.bounds.main_ts),
+            hook_ts=max(shifted, plan.bounds.hook_ts),
+            payoff_ts=max(shifted, plan.bounds.payoff_ts),
+        )
+        plan.add_warning(
+            WARN_EXTRACT_HEAD,
+            (
+                f"no decodable video at {start:.2f}s; the clip starts {cut.head_seconds:.2f}s "
+                "later so the picture keeps up with the sound"
+            ),
+        )
+        logger.warning(
+            "Extract starts %.2fs late for candidate %s: the source has no decodable video there",
+            cut.head_seconds,
+            plan.candidate_id,
+        )
 
     if actual + settings.extract_duration_tolerance_seconds < expected:
         clamped_end = start + actual
@@ -152,9 +186,24 @@ def build_composition_filter(
         if segment.duration <= 0:
             continue
         start, end = segment.start, segment.end
-        parts.append(
-            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[sv{index}]"
-        )
+
+        # Every layer needs the source *after* its timestamps were reset, so the segment's chain
+        # is split once per layer rather than read by several filters. ffmpeg wires a labelled
+        # stream to exactly one reader: a second reader of the same label is fed the raw input
+        # frames, so its `setpts` never runs and it keeps the offset the extraction left on
+        # `trimmed.mp4` (0.8167s on candidate 28). That is what composited the facecam 0.82s
+        # late - a black panel for the first 0.83s, then a layer that never caught up.
+        layers = sorted(segment.layers, key=lambda item: item.z)
+        sources = [f"sv{index}_{layer_index}" for layer_index in range(len(layers))]
+        if sources:
+            video = f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS"
+            if len(sources) > 1:
+                video += f",split={len(sources)}" + "".join(
+                    f"[{name}]" for name in sources
+                )
+            else:
+                video += f"[{sources[0]}]"
+            parts.append(video)
         if has_audio:
             parts.append(
                 f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[sa{index}]"
@@ -167,13 +216,14 @@ def build_composition_filter(
         parts.append(canvas)
         current = f"bg{index}"
 
-        for layer_index, layer in enumerate(sorted(segment.layers, key=lambda item: item.z)):
+        for layer_index, layer in enumerate(layers):
             src_x, src_y, src_w, src_h = (max(1.0, round(value)) for value in layer.src)
             dst_x, dst_y, dst_w, dst_h = (
                 max(1.0, round(value)) for value in layer.dst
             )
             chain = (
-                f"[sv{index}]crop={src_w:.0f}:{src_h:.0f}:{src_x:.0f}:{src_y:.0f},"
+                f"[{sources[layer_index]}]"
+                f"crop={src_w:.0f}:{src_h:.0f}:{src_x:.0f}:{src_y:.0f},"
                 f"scale={dst_w:.0f}:{dst_h:.0f}:flags=lanczos,setsar=1"
             )
             if layer.kind == "blur":
@@ -467,6 +517,13 @@ def plan_composition(
             # Shape the tile to the panel it will fill, so `_crop_inside` does not re-crop it.
             aspect=gaming_panel_aspect(canvas_width, canvas_height),
         )
+        facecam_box = _snap_facecam_box(
+            paths.trimmed,
+            track,
+            facecam_box,
+            settings=settings,
+            duration=duration,
+        )
     layout = plan_layout(
         requested=plan.layout.strategy or settings.layout_strategy,
         source_width=width,
@@ -488,6 +545,46 @@ def plan_composition(
     paths.layout.write_text(json.dumps(layout.to_dict(), indent=2), encoding="utf-8")
     _record_layout(plan, layout, settings=settings)
     return layout
+
+
+def _snap_facecam_box(
+    media_path: Path,
+    track: Sequence[TrackPoint],
+    box: tuple[float, float, float, float] | None,
+    *,
+    settings: Settings,
+    duration: float,
+) -> tuple[float, float, float, float] | None:
+    """
+    Put a derived facecam tile's edges on the webcam overlay's own seams.
+
+    `facecam_box: auto` derives the tile from the *face*, which is not the rectangle the streamer
+    drew: it can overshoot the webcam and leave a strip of the game at the bottom of a panel that is
+    flush with the frame. Reading a couple of seconds of frames and snapping to the seam costs one
+    small decode, and anything that goes wrong - an unreadable clip, no confident seam - leaves the
+    derived box exactly as it was.
+    """
+    if box is None:
+        return box
+    try:
+        frames = faces.sample_gray_frames(
+            media_path,
+            duration_seconds=min(max(duration, 0.5), FACECAM_SNAP_SECONDS),
+            sample_fps=2.0,
+            ffmpeg_path=settings.ffmpeg_path,
+            ffprobe_path=settings.ffprobe_path,
+        )
+        snapped, strength = faces.snap_facecam_box_to_edge(frames, box, track=track)
+    except Exception:
+        logger.debug("Facecam box snap skipped for %s", media_path, exc_info=True)
+        return box
+    if strength > 0.0:
+        logger.info(
+            "Facecam box snapped onto the overlay edge (seam %.1f): %s",
+            strength,
+            ",".join(f"{value:.4f}" for value in snapped),
+        )
+    return snapped
 
 
 def _record_layout(plan: EditPlan, layout: CompositionPlan, *, settings: Settings) -> None:

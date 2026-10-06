@@ -97,6 +97,7 @@ facecam_pad: 1.6              # headroom grown around the detected face before i
 # Render + audio + metadata
 render_crf: 20
 render_preset: medium          # libx264 preset
+extract_preroll_seconds: 3.0   # seek this far back so a cut can start the picture on a keyframe
 edit_max_per_run: 20
 audio_normalize: true
 audio_target_lufs: -14.0

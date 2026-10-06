@@ -606,10 +606,10 @@ HQ capture → bounds → base → dead air → captions → vertical → audio 
 | step | what it does | how | artifact |
 | --- | --- | --- | --- |
 | bounds | picks where the clip starts and ends, before any media is touched | the chat reaction curve (`detect_bounds`), falling back to the fixed review window when there is no chat evidence | `plan.json` |
-| base | cuts the exact source window, untouched | one ffmpeg re-encode of the capture at `intermediate_crf` | `base.mp4` |
+| base | cuts the exact source window, untouched | one ffmpeg re-encode of the capture at `intermediate_crf`, seeking `extract_preroll_seconds` early so the window covers the requested start on both streams | `base.mp4` |
 | dead air | removes silent stretches and resolves the framing | `silencedetect` with guard bands and a payoff cap, then the layout/track pass | `trimmed.mp4`, `layout.json` |
 | captions | turns word timings into readable cues and a subtitle track | ASR word timings → cue grouping → karaoke or plain ASS | `captions.ass`, `transcript.json` |
-| vertical | fills 1080x1920 and burns the captions in | a single ffmpeg pass: crop / scale / overlay / concat / subtitles | `vertical.mp4`, `compose.inputs.json` |
+| vertical | fills 1080x1920 and burns the captions in | a single ffmpeg pass: crop / scale / overlay / concat / subtitles, with one split source per layer | `vertical.mp4`, `compose.inputs.json` |
 | audio | levels the loudness | two-pass `loudnorm` with a true-peak limit | audio replaced in `final.mp4` |
 | metadata | writes the publish metadata and a cover frame | a validated model proposal (deterministic fallback), plus a frame grab | `final.mp4`, `metadata.json`, `thumbnail.jpg` |
 
@@ -713,7 +713,13 @@ needs coordinates the streamer may not know. `auto` derives one from the clip's 
 the panel's aspect (`gaming_panel_aspect`) so `_crop_inside` does not re-crop and shift the window.
 The tile is **centred on the face** and clamped to the frame; it is deliberately never snapped to a
 frame edge, because the tile is small relative to the frame and snapping would move the crop off the
-face entirely. It is resolved in `plan_composition` - the first place a face track exists - and then
+face entirely. It *is* snapped to the webcam overlay's own horizontal borders, though: a streamer's
+facecam is painted over the frame, so its edge is a hard seam in the picture, and a tile derived from
+the face can overshoot it - and with the gaming panel flush against the frame, whatever it overshoots
+by is a strip of the game on screen. The snap (`snap_facecam_box_to_edge`) only fires on a seam that
+clears both an absolute floor and a multiple of the local noise, never moves an edge by more than 15%
+of the tile, and is refused outright when the move would stop the tile framing the tracked face. It
+is resolved in `plan_composition` - the first place a face track exists - and then
 travels the exact same `facecam_box` path a typed box does, `gaming` and all. It needs real face
 boxes, so it requires `layout_track_backend: opencv`; with the motion backend the track carries no
 box, so `auto` warns (`facecam_box_auto_failed`) and the layout degrades to `irl`/`fit_blur`. The box
@@ -959,6 +965,32 @@ at `intermediate_crf` (16) to keep the source window clean, while `trimmed.mp4` 
 `vertical.mp4` are encoded at `render_crf` (20) — only the source window carries the lower
 intermediate CRF.
 
+**One source per layer, and a cut never starts the picture late.** A segment stacks up to two
+layers (gameplay + facecam, blurred fill + video, two conversation panels), and ffmpeg gives a
+labelled stream to exactly one reader: a second reader of the same label is handed the frames of a
+cloned chain that was fed the raw input, so its `setpts` never runs and it keeps whatever offset the
+cut carries. `build_composition_filter` therefore splits the reset source once per layer.
+
+That offset is worth spelling out, because it is invisible until it bites. Input seeking with `-ss`
+can only restart the *video* on a keyframe - the demuxer seeks forward to the next one - while the
+audio, which has no keyframes, starts exactly where it was asked to. A cut landing inside a GOP
+therefore began the picture up to a whole GOP late (0.8167s, 49 frames at 60fps, on candidate 28),
+left the sound behind it, and - because `-t` is enforced on that same labelled timeline - also lost
+the matching frames off the tail. `extract_window` now seeks `extract_preroll_seconds` early and
+trims *both* streams to the same window, so the window stays whole, picture and sound begin on the
+same instant, and every later stage reads one zero-based timeline. When an even longer preroll still
+cannot reach the start (a damaged keyframe), the cut begins where the picture does, the plan's
+bounds follow it, and `extract_head_missing` records why.
+
+**The webcam panel is flush, and its tile stops at the webcam's edge.** The gaming facecam fills the
+bottom of the frame with no gap over the gameplay and nothing below it, so a tile that overshot the
+webcam rectangle would put a strip of the game on screen. `facecam_box: auto` derives its tile from
+the *face*, which is not the rectangle the streamer drew, so the derived box is snapped onto the
+overlay's own border: a painted overlay ends in a hard seam, and the strongest row-to-row step in a
+band around each edge wins - but only when it clears both an absolute floor and a multiple of the
+local noise. The tile is left exactly as derived when no seam is convincing, and it is never moved
+past the tracked face.
+
 **Layouts are segments, not expressions.** A tracked crop becomes spans with a static rectangle
 each, concatenated in the same pass. A crop therefore only moves when the subject genuinely
 moves (deadband), which looks calmer than a continuously drifting expression, and `layout.json`
@@ -1181,6 +1213,7 @@ example config is not identical to a bare `Settings()`.
 | `face_detection_width` / `face_min_size_ratio` / `face_min_hit_ratio` / `face_min_hits` | `480` / `0.06` / `0.2` / `4` | face backend only: the frame size the cascade sees, the smallest believable face, the share of frames the chosen face must appear in, and the minimum detections to be a candidate at all |
 | `quality_warn_upscale` | `2.0` | upscale factor above which a plan carries `upscale_exceeds_threshold` |
 | `render_crf` / `intermediate_crf` / `render_preset` | `20` / `16` / `veryfast` | encode quality of the deliverable and of the intermediates, and the x264 speed/size preset. `base.mp4` and `trimmed.mp4` use `intermediate_crf`; only `vertical.mp4` uses `render_crf` |
+| `extract_preroll_seconds` | `3.0` | how far before the requested start a cut seeks so the video can restart on a keyframe; it has to clear one GOP of the source, and a cut that still starts late is bought a longer preroll (3s, 6s, 12s) before the clip is shifted instead |
 | `edit_max_per_run` | `20` | batch size per run |
 | `audio_normalize` / `audio_target_lufs` / `audio_true_peak` / `audio_limiter` | `true` / `-14.0` / `-1.5` / `true` | two-pass loudness normalization and its targets |
 | `metadata_enabled` / `metadata_model` | `true` / `""` | metadata generation, and an optional model override |
