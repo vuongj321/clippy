@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 import yaml
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +23,8 @@ class Settings(BaseSettings):
     db_path: Path | None = None
     media_dir: Path | None = None
     buffer_dir: Path | None = None
+    edits_dir: Path | None = None
+    source_dir: Path | None = None
 
     pre_context_seconds: float = 30.0
     post_context_seconds: float = 30.0
@@ -47,6 +50,108 @@ class Settings(BaseSettings):
     ffmpeg_path: str = "ffmpeg"
     ffprobe_path: str = "ffprobe"
 
+    # --- HQ capture ---
+    capture_quality: str = "best"
+    capture_downloader: Literal["streamlink", "yt_dlp"] = "streamlink"
+    capture_source_offset_seconds: float = 0.0
+    source_budget_gb: float = 40.0
+    alignment_tolerance_seconds: float = 1.0
+
+    # --- Clip boundaries ---
+    clip_min_seconds: float = 10.0
+    clip_max_seconds: float = 45.0
+    clip_target_seconds: float = 30.0
+    boundary_search_seconds: float = 20.0
+    hook_lookback_seconds: float = 30.0
+    min_context_seconds: float = 1.5
+    reaction_tail_seconds: float = 3.0
+    boundary_min_silence_seconds: float = 0.35
+    word_gap_min_seconds: float = 0.08
+    boundary_llm_refine: bool = False
+    # Evidence sources for boundary detection. Transcript evidence costs one cached ASR call
+    # per candidate and degrades to chat / review-window bounds on any failure.
+    boundary_transcript_evidence: bool = True
+    boundary_audio_evidence: bool = False
+    extract_duration_tolerance_seconds: float = 0.5
+
+    # --- Dead-air removal ---
+    deadair_enabled: bool = True
+    deadair_mode: Literal["cut", "speed"] = "cut"
+    deadair_noise_db: float = -30.0
+    deadair_min_gap_seconds: float = 0.8
+    deadair_keep_pad_seconds: float = 0.2
+    deadair_min_keep_seconds: float = 0.5
+    deadair_max_removed_ratio: float = 0.4
+    deadair_speed_factor: float = 1.5
+
+    # --- Burned-in captions ---
+    caption_enabled: bool = True
+    caption_style: Literal["karaoke_highlight", "block_pop", "minimal"] = "karaoke_highlight"
+    caption_font: str = "Arial"
+    # `None` keeps each preset's own size (44 for minimal, 54 for karaoke_highlight, 60 for
+    # block_pop); setting it forces one size on every style.
+    caption_font_size: int | None = None
+    caption_max_chars_per_line: int = 18
+    caption_max_lines: int = 2
+    caption_max_cue_seconds: float = 2.2
+    caption_min_cue_seconds: float = 0.5
+    caption_break_gap_seconds: float = 0.35
+    caption_emphasis: Literal["heuristic", "llm", "off"] = "heuristic"
+    caption_primary_color: str = "&H00FFFFFF"
+    caption_highlight_color: str = "&H0000D7FF"
+    caption_margin_v: int = 260
+    caption_safe_area: Literal["auto", "top", "middle", "bottom"] = "auto"
+    caption_avoid_ratio: float = 0.25
+    caption_uppercase: bool = True
+    caption_fonts_dir: str = "C:/Windows/Fonts"
+    asr_word_timestamps: bool = True
+
+    # --- Vertical formatting ---
+    clip_target_width: int = 1080
+    clip_target_height: int = 1920
+    clip_fps: int = 30
+    layout_strategy: Literal["auto", "fit_blur", "irl", "gaming", "conversation"] = "auto"
+    layout_track_backend: Literal["none", "motion", "opencv", "mediapipe"] = "motion"
+    layout_smoothing: float = 0.12
+    layout_zoom: float = 1.0
+    # `layout_track_backend: opencv` only. Detection runs on small grayscale frames, so the width
+    # is a speed/accuracy tradeoff, and the hit ratio is the gate that stops a busy background
+    # from steering the framing: below it the clip falls back to motion tracking.
+    face_detection_width: int = 480
+    face_min_size_ratio: float = 0.06
+    face_min_hit_ratio: float = 0.2
+    # Minimum number of sampled frames a face must appear in before it can be the chosen webcam.
+    # Raises the bar above a chance hit; see `edit/faces.py::MIN_FACE_HITS`.
+    face_min_hits: int = 4
+    # `"x,y,w,h"` (fractions of the frame when every value is <= 1, else pixels), blank for no
+    # facecam, or `"auto"` to derive the box from the face track at composition time. `facecam_pad`
+    # is the headroom grown around the detected face before it becomes the panel's source rectangle.
+    facecam_box: str = ""
+    facecam_pad: float = 1.6
+    quality_warn_upscale: float = 2.0
+
+    # --- Render + audio ---
+    render_dir: Path | None = None
+    render_crf: int = 20
+    intermediate_crf: int = 16
+    render_preset: str = "veryfast"
+    # A cut can only start the picture on a keyframe, so an extraction seeks this far back and
+    # trims both streams to the same window; it has to clear one GOP of the source.
+    extract_preroll_seconds: float = 3.0
+    edit_max_per_run: int = 20
+    audio_normalize: bool = True
+    audio_target_lufs: float = -14.0
+    audio_true_peak: float = -1.5
+    audio_limiter: bool = True
+
+    # --- Metadata ---
+    metadata_enabled: bool = True
+    metadata_model: str = ""
+    metadata_max_hashtags: int = 6
+    metadata_title_max_chars: int = 60
+    thumbnail_enabled: bool = True
+    thumbnail_overlay_text: bool = False
+
     twitch_client_id: str = ""
     twitch_client_secret: str = ""
     twitch_irc_nick: str = ""
@@ -71,10 +176,42 @@ class Settings(BaseSettings):
     def resolved_buffer_dir(self) -> Path:
         return self.buffer_dir or (self.data_dir / "buffer")
 
+    def resolved_edits_dir(self) -> Path:
+        return self.edits_dir or (self.render_dir or (self.data_dir / "edits"))
+
+    def resolved_source_dir(self) -> Path:
+        return self.source_dir or (self.data_dir / "source")
+
+    def facecam_box_is_auto(self) -> bool:
+        """`facecam_box: auto` asks for a box derived from the face track at composition time."""
+        return (self.facecam_box or "").strip().lower() == "auto"
+
+    def parsed_facecam_box(self) -> tuple[float, float, float, float] | None:
+        """Parse "x,y,w,h". Values are fractions of the source frame when <= 1, else pixels.
+
+        An empty value and the `auto` sentinel both mean "no explicit box"; `auto` is resolved
+        later from the tracked face box, so it must not be parsed as four numbers here.
+        """
+        raw = (self.facecam_box or "").strip()
+        if not raw or raw.lower() == "auto":
+            return None
+        parts = [p.strip() for p in raw.split(",")]
+        if len(parts) != 4:
+            raise ValueError(
+                f"facecam_box must be 'x,y,w,h' (got {self.facecam_box!r})"
+            )
+        try:
+            values = tuple(float(p) for p in parts)
+        except ValueError as exc:
+            raise ValueError(f"facecam_box must be numeric (got {self.facecam_box!r})") from exc
+        return values  # type: ignore[return-value]
+
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.resolved_media_dir().mkdir(parents=True, exist_ok=True)
         self.resolved_buffer_dir().mkdir(parents=True, exist_ok=True)
+        self.resolved_edits_dir().mkdir(parents=True, exist_ok=True)
+        self.resolved_source_dir().mkdir(parents=True, exist_ok=True)
 
 
 def load_yaml_overrides(path: Path) -> dict:

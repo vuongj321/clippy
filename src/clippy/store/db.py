@@ -11,6 +11,9 @@ from typing import Any, Iterator, Literal
 CandidateStatus = Literal["pending", "approved", "rejected"]
 StreamMode = Literal["vod", "live"]
 Decision = Literal["approved", "rejected"]
+EditStatus = Literal["unrendered", "rendering", "rendered", "failed"]
+RenderKind = Literal["plan", "rough", "final"]
+RenderStatus = Literal["ok", "failed"]
 
 REJECTION_REASONS = (
     "false_alarm",
@@ -18,6 +21,8 @@ REJECTION_REASONS = (
     "too_long",
     "boring",
     "unsafe",
+    "bad_edit",
+    "bad_captions",
     "other",
 )
 
@@ -35,6 +40,12 @@ CREATE TABLE IF NOT EXISTS streams (
     source_url TEXT,
     vod_id TEXT,
     media_path TEXT,
+    source_width INTEGER,
+    source_height INTEGER,
+    source_fps REAL,
+    capture_quality TEXT,
+    source_offset_seconds REAL NOT NULL DEFAULT 0,
+    source_bytes INTEGER,
     started_at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -51,8 +62,31 @@ CREATE TABLE IF NOT EXISTS candidates (
     extract_reason TEXT,
     caption TEXT,
     transcript TEXT,
+    edit_status TEXT NOT NULL DEFAULT 'unrendered'
+        CHECK(edit_status IN ('unrendered', 'rendering', 'rendered', 'failed')),
+    edited_media_path TEXT,
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK(status IN ('pending', 'approved', 'rejected')),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS renders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER NOT NULL REFERENCES candidates(id),
+    revision INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'plan' CHECK(kind IN ('plan', 'rough', 'final')),
+    path TEXT,
+    plan_json TEXT,
+    transcript_json TEXT,
+    captions_path TEXT,
+    layout_json TEXT,
+    metadata_json TEXT,
+    width INTEGER,
+    height INTEGER,
+    duration REAL,
+    status TEXT NOT NULL DEFAULT 'ok' CHECK(status IN ('ok', 'failed')),
+    error TEXT,
+    is_current INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 
@@ -69,6 +103,10 @@ CREATE INDEX IF NOT EXISTS idx_candidates_stream_score
     ON candidates(stream_id, score DESC);
 CREATE INDEX IF NOT EXISTS idx_candidates_status
     ON candidates(status);
+CREATE INDEX IF NOT EXISTS idx_renders_candidate
+    ON renders(candidate_id, revision DESC);
+CREATE INDEX IF NOT EXISTS idx_renders_current
+    ON renders(candidate_id, is_current);
 """
 
 # SQLite cannot bind identifiers. These DDL strings are module constants only.
@@ -76,6 +114,29 @@ CANDIDATE_COLUMN_MIGRATIONS = (
     ("extract_reason", "ALTER TABLE candidates ADD COLUMN extract_reason TEXT"),
     ("caption", "ALTER TABLE candidates ADD COLUMN caption TEXT"),
     ("transcript", "ALTER TABLE candidates ADD COLUMN transcript TEXT"),
+    (
+        "edit_status",
+        "ALTER TABLE candidates ADD COLUMN edit_status TEXT NOT NULL DEFAULT 'unrendered'"
+        " CHECK(edit_status IN ('unrendered', 'rendering', 'rendered', 'failed'))",
+    ),
+    ("edited_media_path", "ALTER TABLE candidates ADD COLUMN edited_media_path TEXT"),
+)
+
+STREAM_COLUMN_MIGRATIONS = (
+    ("source_width", "ALTER TABLE streams ADD COLUMN source_width INTEGER"),
+    ("source_height", "ALTER TABLE streams ADD COLUMN source_height INTEGER"),
+    ("source_fps", "ALTER TABLE streams ADD COLUMN source_fps REAL"),
+    ("capture_quality", "ALTER TABLE streams ADD COLUMN capture_quality TEXT"),
+    (
+        "source_offset_seconds",
+        "ALTER TABLE streams ADD COLUMN source_offset_seconds REAL NOT NULL DEFAULT 0",
+    ),
+    ("source_bytes", "ALTER TABLE streams ADD COLUMN source_bytes INTEGER"),
+)
+
+TABLE_MIGRATIONS = (
+    ("candidates", CANDIDATE_COLUMN_MIGRATIONS),
+    ("streams", STREAM_COLUMN_MIGRATIONS),
 )
 
 
@@ -100,6 +161,12 @@ class Stream:
     media_path: str | None
     started_at: str
     created_at: str
+    source_width: int | None = None
+    source_height: int | None = None
+    source_fps: float | None = None
+    capture_quality: str | None = None
+    source_offset_seconds: float = 0.0
+    source_bytes: int | None = None
 
 
 @dataclass
@@ -117,6 +184,31 @@ class Candidate:
     extract_reason: str | None = None
     caption: str | None = None
     transcript: str | None = None
+    edit_status: EditStatus = "unrendered"
+    edited_media_path: str | None = None
+
+
+@dataclass
+class Render:
+    """One revision of an automated edit (plan, rough artifact or final video)."""
+
+    id: int
+    candidate_id: int
+    revision: int
+    kind: RenderKind
+    path: str | None
+    status: RenderStatus
+    created_at: str
+    is_current: int = 0
+    plan_json: str | None = None
+    transcript_json: str | None = None
+    captions_path: str | None = None
+    layout_json: str | None = None
+    metadata_json: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration: float | None = None
+    error: str | None = None
 
 
 @dataclass
@@ -169,12 +261,16 @@ class Database:
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
-        existing = {
-            row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()
-        }
-        for name, ddl in CANDIDATE_COLUMN_MIGRATIONS:
-            if name not in existing:
-                conn.execute(ddl)
+        # Table names come from TABLE_MIGRATIONS constants (never user input),
+        # because SQLite cannot bind identifiers in PRAGMA/ALTER statements.
+        for table, migrations in TABLE_MIGRATIONS:
+            existing = {
+                row[1]
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for name, ddl in migrations:
+                if name not in existing:
+                    conn.execute(ddl)
 
     def get_or_create_streamer(self, login: str, display_name: str | None = None) -> Streamer:
         login = login.lower().strip()
@@ -208,6 +304,12 @@ class Database:
         vod_id: str | None = None,
         media_path: str | None = None,
         started_at: str | None = None,
+        source_width: int | None = None,
+        source_height: int | None = None,
+        source_fps: float | None = None,
+        capture_quality: str | None = None,
+        source_offset_seconds: float = 0.0,
+        source_bytes: int | None = None,
     ) -> Stream:
         now = utc_now()
         started = started_at or now
@@ -215,10 +317,26 @@ class Database:
             cur = conn.execute(
                 """
                 INSERT INTO streams
-                    (streamer_id, mode, source_url, vod_id, media_path, started_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (streamer_id, mode, source_url, vod_id, media_path,
+                     source_width, source_height, source_fps, capture_quality,
+                     source_offset_seconds, source_bytes, started_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (streamer_id, mode, source_url, vod_id, media_path, started, now),
+                (
+                    streamer_id,
+                    mode,
+                    source_url,
+                    vod_id,
+                    media_path,
+                    source_width,
+                    source_height,
+                    source_fps,
+                    capture_quality,
+                    source_offset_seconds,
+                    source_bytes,
+                    started,
+                    now,
+                ),
             )
             return Stream(
                 id=cur.lastrowid,
@@ -229,7 +347,102 @@ class Database:
                 media_path=media_path,
                 started_at=started,
                 created_at=now,
+                source_width=source_width,
+                source_height=source_height,
+                source_fps=source_fps,
+                capture_quality=capture_quality,
+                source_offset_seconds=source_offset_seconds,
+                source_bytes=source_bytes,
             )
+
+    def get_streamer(self, streamer_id: int) -> Streamer | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM streamers WHERE id = ?", (streamer_id,)
+            ).fetchone()
+            return Streamer(**dict(row)) if row else None
+
+    def get_stream(self, stream_id: int) -> Stream | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM streams WHERE id = ?", (stream_id,)
+            ).fetchone()
+            return Stream(**dict(row)) if row else None
+
+    def update_stream_source(
+        self,
+        stream_id: int,
+        *,
+        media_path: str | None = None,
+        source_width: int | None = None,
+        source_height: int | None = None,
+        source_fps: float | None = None,
+        capture_quality: str | None = None,
+        source_offset_seconds: float | None = None,
+        source_bytes: int | None = None,
+    ) -> None:
+        """
+        Record where a stream's footage actually lives.
+
+        Used by `clippy-capture` after an HQ download so later edits can re-cut
+        from the real source. Passing ``None`` leaves a column unchanged.
+        """
+        assignments: list[str] = []
+        params: list[Any] = []
+        for column, value in (
+            ("media_path", media_path),
+            ("source_width", source_width),
+            ("source_height", source_height),
+            ("source_fps", source_fps),
+            ("capture_quality", capture_quality),
+            ("source_offset_seconds", source_offset_seconds),
+            ("source_bytes", source_bytes),
+        ):
+            if value is not None:
+                assignments.append(f"{column} = ?")
+                params.append(value)
+        if not assignments:
+            return
+        params.append(stream_id)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE streams SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
+
+    def list_candidates(
+        self,
+        *,
+        ids: list[int] | None = None,
+        stream_id: int | None = None,
+        status: CandidateStatus | None = None,
+        limit: int = 200,
+    ) -> list[Candidate]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if ids:
+            placeholders = ", ".join("?" for _ in ids)
+            clauses.append(f"id IN ({placeholders})")
+            params.extend(ids)
+        if stream_id is not None:
+            clauses.append("stream_id = ?")
+            params.append(stream_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM candidates
+                {where}
+                ORDER BY score DESC, source_ts ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._candidate_from_row(row) for row in rows]
 
     def create_candidate(
         self,
@@ -304,6 +517,142 @@ class Database:
                 f"UPDATE candidates SET {', '.join(assignments)} WHERE id = ?",
                 params,
             )
+
+    def update_candidate_edit(
+        self,
+        candidate_id: int,
+        *,
+        edit_status: EditStatus | None = None,
+        edited_media_path: str | None = None,
+    ) -> None:
+        """
+        Update the denormalized edit mirror on the candidate row.
+
+        Passing ``None`` means "leave unchanged" (same convention as
+        `update_candidate_caption`), so a partial update can never clear state.
+        """
+        assignments: list[str] = []
+        params: list[Any] = []
+        if edit_status is not None:
+            assignments.append("edit_status = ?")
+            params.append(edit_status)
+        if edited_media_path is not None:
+            assignments.append("edited_media_path = ?")
+            params.append(edited_media_path)
+        if not assignments:
+            return
+        params.append(candidate_id)
+        with self.connection() as conn:
+            conn.execute(
+                f"UPDATE candidates SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
+
+    def create_render(
+        self,
+        candidate_id: int,
+        *,
+        kind: RenderKind = "plan",
+        path: str | None = None,
+        plan_json: str | None = None,
+        transcript_json: str | None = None,
+        captions_path: str | None = None,
+        layout_json: str | None = None,
+        metadata_json: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        duration: float | None = None,
+        status: RenderStatus = "ok",
+        error: str | None = None,
+    ) -> Render:
+        """
+        Append a render revision.
+
+        A successful `final` render becomes the current one for the candidate;
+        plans and failures never displace an existing deliverable.
+        """
+        now = utc_now()
+        make_current = kind == "final" and status == "ok"
+        with self.connection() as conn:
+            revision = conn.execute(
+                """
+                SELECT COALESCE(MAX(revision), 0) + 1 AS revision
+                FROM renders WHERE candidate_id = ?
+                """,
+                (candidate_id,),
+            ).fetchone()["revision"]
+            cur = conn.execute(
+                """
+                INSERT INTO renders (
+                    candidate_id, revision, kind, path, plan_json, transcript_json,
+                    captions_path, layout_json, metadata_json, width, height, duration,
+                    status, error, is_current, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate_id,
+                    revision,
+                    kind,
+                    path,
+                    plan_json,
+                    transcript_json,
+                    captions_path,
+                    layout_json,
+                    metadata_json,
+                    width,
+                    height,
+                    duration,
+                    status,
+                    error,
+                    1 if make_current else 0,
+                    now,
+                ),
+            )
+            render_id = cur.lastrowid
+            if make_current:
+                conn.execute(
+                    """
+                    UPDATE renders SET is_current = 0
+                    WHERE candidate_id = ? AND id != ?
+                    """,
+                    (candidate_id, render_id),
+                )
+            row = conn.execute(
+                "SELECT * FROM renders WHERE id = ?", (render_id,)
+            ).fetchone()
+            return self._render_from_row(row)
+
+    def get_render(self, render_id: int) -> Render | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM renders WHERE id = ?", (render_id,)
+            ).fetchone()
+            return self._render_from_row(row) if row else None
+
+    def get_current_render(self, candidate_id: int) -> Render | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM renders
+                WHERE candidate_id = ? AND is_current = 1
+                ORDER BY revision DESC LIMIT 1
+                """,
+                (candidate_id,),
+            ).fetchone()
+            return self._render_from_row(row) if row else None
+
+    def list_renders(self, candidate_id: int, *, limit: int = 50) -> list[Render]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM renders
+                WHERE candidate_id = ?
+                ORDER BY revision DESC
+                LIMIT ?
+                """,
+                (candidate_id, limit),
+            ).fetchall()
+        return [self._render_from_row(row) for row in rows]
 
     def get_candidate(self, candidate_id: int) -> Candidate | None:
         with self.connection() as conn:
@@ -472,6 +821,10 @@ class Database:
         data["signals"] = json.loads(data["signals"] or "{}")
         return Candidate(**data)
 
+    @staticmethod
+    def _render_from_row(row: sqlite3.Row) -> Render:
+        return Render(**dict(row))
+
     def _candidate_view_from_row(self, row: sqlite3.Row) -> CandidateView:
         candidate = Candidate(
             id=row["id"],
@@ -487,6 +840,8 @@ class Database:
             extract_reason=row["extract_reason"],
             caption=row["caption"],
             transcript=row["transcript"],
+            edit_status=row["edit_status"],
+            edited_media_path=row["edited_media_path"],
         )
         review = None
         if row["review_id"] is not None:

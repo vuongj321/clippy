@@ -22,7 +22,16 @@
         <div class="sub">
           #{{ view.candidate.id }} · {{ view.streamer_display_name }} ·
           t={{ '%.1f'|format(view.candidate.source_ts) }}s · {{ view.stream_mode }} · {{ view.candidate.status }}
+          {%- if view.candidate.edit_status != 'unrendered' %} ·
+            <strong>{{ view.candidate.edit_status }}</strong>
+          {%- endif %}
         </div>
+        {% if view.candidate.edited_media_path %}
+          <p class="reason">
+            edited clip ready ·
+            <a href="/candidates/{{ view.candidate.id }}/download">download</a>
+          </p>
+        {% endif %}
         {% if view.candidate.media_path %}
           <video controls preload="metadata" src="/media/{{ view.candidate.id }}"></video>
         {% else %}
