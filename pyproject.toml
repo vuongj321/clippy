@@ -18,6 +18,7 @@ dependencies = [
     "numpy>=2.1.0",
     "pyyaml>=6.0.2",
     "websockets>=13.0",
+    "opencv-python-headless>=4.10,<5",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +36,8 @@ clippy-vod = "clippy.cli:run_vod_main"
 clippy-live = "clippy.cli:run_live_main"
 clippy-serve = "clippy.cli:serve_main"
 clippy-export = "clippy.cli:export_main"
+clippy-edit = "clippy.cli:edit_main"
+clippy-capture = "clippy.cli:capture_main"
 
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]

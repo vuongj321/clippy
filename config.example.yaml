@@ -1,4 +1,5 @@
-# Clippy configuration (optional). Env vars with CLIPPY_ prefix override these.
+# Clippy configuration (optional). Values set here override CLIPPY_* environment variables, not the
+# other way round — see the layering note in docs/architecture.md#configuration.
 
 # Paths (defaults: ./data)
 # data_dir: data
@@ -38,12 +39,75 @@ ffprobe_path: ffprobe
 # twitch_irc_nick: ""
 # twitch_irc_oauth: ""
 
-# Captions (also set CLIPPY_OPENAI_API_KEY in .env). Not burned into MP4s yet.
+# Review-UI caption + transcript for NEW runs (set CLIPPY_OPENAI_API_KEY in .env).
+# The burned-in caption track for rendered clips is configured under "Burned-in captions" below.
 # openai_base_url: https://api.openai.com/v1
 # asr_model: whisper-1
 # caption_model: gpt-4o-mini
 # caption_max_chat_messages: 40
 # caption_max_per_run: 20  # top-N extracted clips this run; the rest are never captioned
+
+# --- Automated short-form edit (clippy-edit) ---
+# HQ capture (clippy-capture, needs streamlink on PATH)
+capture_quality: best          # streamlink quality selector, e.g. best, 1080p60, 720p
+capture_downloader: streamlink # streamlink | yt_dlp
+
+# Clip boundaries
+clip_min_seconds: 10.0
+clip_max_seconds: 45.0
+hook_lookback_seconds: 30.0    # max walk-back to the setup line (transcript evidence)
+boundary_transcript_evidence: true   # ASR the detection window for word-timed bounds
+boundary_audio_evidence: false       # extra RMS decay evidence (noisier than words)
+reaction_tail_seconds: 3.0
+
+# Dead air
+deadair_enabled: true
+deadair_mode: cut              # cut | speed
+deadair_noise_db: -30.0
+
+# Burned-in captions
+caption_enabled: true
+caption_style: karaoke_highlight  # karaoke_highlight | block_pop | minimal
+# caption_font_size: 54           # null keeps each preset's own size (44 / 54 / 60)
+caption_emphasis: heuristic       # heuristic | llm | off
+caption_margin_v: 260
+caption_safe_area: auto
+caption_avoid_ratio: 0.25         # auto flips the band above this share of frames
+
+# Vertical formatting
+clip_target_width: 1080
+clip_target_height: 1920
+clip_fps: 30                   # 0 follows the source fps
+layout_strategy: auto          # auto | fit_blur | irl | gaming | conversation
+layout_track_backend: motion   # none | motion | opencv (face detector) | mediapipe
+layout_smoothing: 0.12         # crop-pan responsiveness (1.0 = no smoothing)
+layout_zoom: 1.0              # tighten the tracked crop around the subject (irl only)
+quality_warn_upscale: 2.0
+# Facecam panel for the `gaming` layout: "x,y,w,h" (fractions of the frame when every value is
+# <= 1, else pixels), or "auto" to derive the box from the tracked face. `auto` needs
+# `layout_track_backend: opencv`; without a usable face it warns and falls back to fit_blur.
+facecam_box: ""               # "" | "x,y,w,h" | "auto"
+facecam_pad: 1.6              # headroom grown around the detected face before it becomes a tile (auto only)
+# Face backend only (`layout_track_backend: opencv`)
+# face_detection_width: 480    # width of the grayscale frames the cascade sees
+# face_min_size_ratio: 0.06    # smallest face worth believing, as a fraction of the frame
+# face_min_hit_ratio: 0.2      # share of frames the chosen (most persistent) face must appear in
+# face_min_hits: 4             # sampled frames a face must appear in before it can be the webcam
+
+# Render + audio + metadata
+render_crf: 20
+render_preset: medium          # libx264 preset
+extract_preroll_seconds: 3.0   # seek this far back so a cut can start the picture on a keyframe
+edit_max_per_run: 20
+audio_normalize: true
+audio_target_lufs: -14.0
+audio_true_peak: -1.5
+audio_limiter: true
+metadata_enabled: true
+metadata_title_max_chars: 60
+metadata_max_hashtags: 6
+thumbnail_enabled: true
+thumbnail_overlay_text: true
 
 host: 127.0.0.1
 port: 8000
